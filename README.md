@@ -118,6 +118,16 @@ ec.stop()                                     # cleanly close connections
 - `requirements.txt` - dependencies
 - `.gitignore` - keeps pairing credentials out of version control
 
+## A note on how this was built
+
+The hard part of this project, figuring out how to control an Ecobee locally
+over HomeKit at all, was months of my own trial and error. The pairing script
+(`pair_ecobee.py`) I wrote entirely myself.
+
+I used AI assistance to help build out and refactor the controller, CLI, and
+GUI, and to write this README. The core discovery, the debugging direction,
+the testing on real hardware, and the design calls are mine.
+
 ## Acknowledgements
 
 Built on [`aiohomekit`](https://github.com/Jc2k/aiohomekit), the same HomeKit client that powers Home Assistant's HomeKit Controller integration.
