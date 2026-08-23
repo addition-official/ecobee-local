@@ -14,6 +14,7 @@ Works with any HomeKit-capable Ecobee. Developed and tested against an **Ecobee3
 - Set target temperature, mode (heat / cool / auto / off), heat/cool thresholds, and fan (auto / on)
 - Read remote SmartSensors and the built-in occupancy sensor (temperature, occupancy, battery)
 - Set target humidity on models that have a humidifier/dehumidifier (e.g. Smart Premium)
+- Read and switch comfort profiles (Home / Sleep / Away) locally on supported models (see notes; the ecobee3 lite does not support this correctly)
 - Fahrenheit or Celsius display, with exact half-degree Celsius setting
 - A live GUI that auto-updates, or a scriptable CLI, or an importable library
 
@@ -65,16 +66,17 @@ With no arguments this opens the **control window** (one card per thermostat). O
 Everything the GUI does is also scriptable. All `--set-*` actions require `--label`.
 
 ```
-python ecobee_controller.py                         # open the GUI
-python ecobee_controller.py --dump                  # list every characteristic each thermostat exposes
-python ecobee_controller.py --dump --raw            # same, without truncating long values
+python ecobee_controller.py                                            # open the GUI
+python ecobee_controller.py --dump                                     # list every characteristic each thermostat exposes
+python ecobee_controller.py --dump --raw                               # same, without truncating long values
 python ecobee_controller.py --label main --set-temp 72
-python ecobee_controller.py --label main --set-mode 2       # 0=off 1=heat 2=cool 3=auto
+python ecobee_controller.py --label main --set-mode 2                  # 0=off 1=heat 2=cool 3=auto
 python ecobee_controller.py --label main --set-heat 68 --set-cool 75   # auto-mode range
 python ecobee_controller.py --label main --set-fan on
-python ecobee_controller.py --headless              # run as a background service (no GUI)
-python ecobee_controller.py --debug                 # print connection/subscription events
-python ecobee_controller.py --folder PATH           # use a different credentials folder
+python ecobee_controller.py --label main --set-comfort away            # home/sleep/away/hold (supported models)
+python ecobee_controller.py --headless                                 # run as a background service (no GUI)
+python ecobee_controller.py --debug                                    # print connection/subscription events
+python ecobee_controller.py --folder PATH                              # use a different credentials folder
 ```
 
 `--dump` is the tool for discovering what your specific model exposes: it prints every accessory, service, and characteristic with its UUID, current value, permissions, and range.
@@ -98,6 +100,12 @@ ec.set_heat_threshold("main", 68)             # auto mode
 ec.set_cool_threshold("main", 75)
 ec.set_fan("main", auto=True)
 
+# comfort profiles (works on some models, not the ecobee3 lite; see notes)
+print(ec.get_comfort_mode("main"))            # "home" / "sleep" / "away" / "hold"
+ec.set_comfort_mode("main", "away")           # switch locally, no cloud
+# the first comfort call prints a one-time firmware-caveat note to stderr;
+# construct EcobeeController(..., comfort_warning=False) to silence it
+
 ec.stop()                                     # cleanly close connections
 ```
 
@@ -119,11 +127,42 @@ ec.stop()                                     # cleanly close connections
 - **Air quality is not available.** The Smart Premium has an air-quality sensor, but Ecobee does **not** publish air quality (VOC / CO₂) over HomeKit - only through their cloud. So no local tool, including this one, Apple Home, or Home Assistant, can read it over HomeKit.
 - **The Ecobee app and HomeKit can briefly disagree.** Ecobee drives its own screen and app from its cloud/comfort-profile system. If you change settings in the **ecobee app**, the standard HomeKit state this tool reads may show a different or stale value (for example, showing "Auto" with an odd range) until the setting is next changed **through HomeKit**. Changes made with this tool are always consistent. This is an Ecobee behavior, not a bug in this project.
 - **Scheduling isn't a HomeKit feature.** HomeKit has no concept of a weekly schedule; Ecobee's comfort schedules live in its own system. You can build time-based automation on top of this library, but it can't read/write Ecobee's schedules over HomeKit.
+- **Comfort profiles work on some models, not all.** On supported models you can read and switch Home / Sleep / Away locally. **This does not work on the ecobee3 lite, which has a known ecobee firmware bug that always reports the same comfort value regardless of the actual setting.** For this reason the GUI shows comfort controls but lets you turn them off per-thermostat in Settings. Custom comfort profiles (e.g. a "Gym" profile) aren't individually addressable over HomeKit; they all report as "hold", and you can't create profiles from here (that's an ecobee-app action). The comfort UUIDs are vendor-specific and undocumented by ecobee, but verified on hardware and corroborated by the Home Assistant project.
+
+## Optional: MQTT bridge
+
+`ecobee_mqtt.py` is an optional companion script that mirrors your thermostats
+onto an MQTT broker, so other tools (Node-RED, dashboards, custom scripts, Home
+Assistant, etc.) can read state and send commands over MQTT. It's standalone
+and experimental; it uses this library under the hood.
+
+Requires a running MQTT broker (e.g. [Mosquitto](https://mosquitto.org/)) and
+the paho client:
+
+    pip install paho-mqtt
+    winget install --id=EclipseFoundation.Mosquitto -e   # Windows, if you need a broker
+
+Run it:
+
+    python ecobee_mqtt.py                       # broker at localhost:1883
+    python ecobee_mqtt.py --host 192.168.1.50   # broker elsewhere
+
+It publishes state to `ecobee/<label>/<field>` (temperature, target, mode,
+humidity, fan, comfort, plus a full JSON blob at `ecobee/<label>/state`) and
+listens for commands on `ecobee/<label>/set/<thing>`:
+
+    ecobee/<label>/set/target     72        (Fahrenheit)
+    ecobee/<label>/set/target_c   22.5      (Celsius)
+    ecobee/<label>/set/mode       cool      (off/heat/cool/auto)
+    ecobee/<label>/set/fan        auto      (auto/on)
+    ecobee/<label>/set/humidity   40
+    ecobee/<label>/set/comfort    away      (home/sleep/away/hold)
 
 ## Files
 
 - `pair_ecobee.py` - one-time pairing wizard
 - `ecobee_controller.py` - the library, CLI, and GUI (all in one)
+- `ecobee_mqtt.py` - optional MQTT bridge (experimental; needs `paho-mqtt` and a broker)
 - `requirements.txt` - dependencies
 - `.gitignore` - keeps pairing credentials out of version control
 
