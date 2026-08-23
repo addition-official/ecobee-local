@@ -1,0 +1,15 @@
+# Local Ecobee HomeKit control — dependencies
+#
+# Install with:  pip install -r requirements.txt
+#
+# aiohomekit is the HomeKit Accessory Protocol client that does the real work
+# (pairing, reading/writing characteristics over the local network). zeroconf
+# is used for mDNS discovery when pairing; aiohomekit depends on it too, but it
+# is listed explicitly because pair_ecobee.py imports it directly.
+
+aiohomekit>=3.0
+zeroconf>=0.130
+
+# Note: the GUI uses Tkinter, which ships with Python itself (no install
+# needed). On some Linux distros it is a separate system package, e.g.
+# "sudo apt install python3-tk".

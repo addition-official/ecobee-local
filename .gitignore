@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# CREDENTIALS — never commit these.
+# Pairing files contain long-term HomeKit keys for your thermostats. Anyone
+# with them can control your devices on your network. They live in a per-user
+# folder by default, but if you ever point --folder at the repo or copy a
+# pair file in, these rules keep them out of git.
+# ---------------------------------------------------------------------------
+pair.json
+pair*.json
+*.pairing.json
+ecobee-local/
+pairings/
+creds/
+
+# Any stray JSON that looks like a saved pairing (belt and suspenders).
+# If you have legitimate committed JSON, remove/adjust this line.
+**/AccessoryPairingID*
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# ---------------------------------------------------------------------------
+# Editor / OS cruft
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
