@@ -36,7 +36,7 @@ python pair_ecobee.py
 The wizard will:
 - scan your network and show a numbered list of HomeKit devices (or filter by name),
 - let you pick the thermostat, give it a short label and a friendly name,
-- ask for the 8-digit HomeKit setup code shown on the thermostat screen (type it any way — `12345678`, `1234 5678`, or `123-45-678` all work),
+- ask for the 8-digit HomeKit setup code shown on the thermostat screen (type it any way: `12345678`, `1234 5678`, or `123-45-678` all work),
 - save the credentials to a file.
 
 Run it again for each additional thermostat. Files are saved to a per-user folder (`%LOCALAPPDATA%\ecobee-local` on Windows, `~/ecobee-local` on macOS/Linux) by default; use `--folder PATH` to change it.
@@ -96,7 +96,7 @@ ec.stop()                                     # cleanly close connections
 
 - `setpoint_kind` is `"single"` in heat/cool/off and `"range"` in auto.
 - `display_target` is the value(s) a UI should show: one number in single-setpoint modes, `{"heat": ..., "cool": ...}` in auto.
-- In auto mode `target_temp` is `None`, because a single target is meaningless there — the thermostat runs off the heat/cool thresholds. Read `heat_threshold` / `cool_threshold` (or `display_target`) instead.
+- In auto mode `target_temp` is `None`, because a single target is meaningless there - the thermostat runs off the heat/cool thresholds. Read `heat_threshold` / `cool_threshold` (or `display_target`) instead.
 - Temperatures are in Fahrenheit; the raw Celsius the device reports is also included as `*_c` (e.g. `target_temp_c`).
 - Fields a given model doesn't support read as `"--"` rather than a misleading `0`.
 
@@ -107,16 +107,16 @@ ec.stop()                                     # cleanly close connections
 ## Notes and limitations
 
 - **This is local HomeKit control.** It reads and controls whatever the thermostat exposes over HomeKit.
-- **Air quality is not available.** The Smart Premium has an air-quality sensor, but Ecobee does **not** publish air quality (VOC / CO₂) over HomeKit — only through their cloud. So no local tool, including this one, Apple Home, or Home Assistant, can read it over HomeKit.
+- **Air quality is not available.** The Smart Premium has an air-quality sensor, but Ecobee does **not** publish air quality (VOC / CO₂) over HomeKit - only through their cloud. So no local tool, including this one, Apple Home, or Home Assistant, can read it over HomeKit.
 - **The Ecobee app and HomeKit can briefly disagree.** Ecobee drives its own screen and app from its cloud/comfort-profile system. If you change settings in the **ecobee app**, the standard HomeKit state this tool reads may show a different or stale value (for example, showing "Auto" with an odd range) until the setting is next changed **through HomeKit**. Changes made with this tool are always consistent. This is an Ecobee behavior, not a bug in this project.
 - **Scheduling isn't a HomeKit feature.** HomeKit has no concept of a weekly schedule; Ecobee's comfort schedules live in its own system. You can build time-based automation on top of this library, but it can't read/write Ecobee's schedules over HomeKit.
 
 ## Files
 
-- `pair_ecobee.py` — one-time pairing wizard
-- `ecobee_controller.py` — the library, CLI, and GUI (all in one)
-- `requirements.txt` — dependencies
-- `.gitignore` — keeps pairing credentials out of version control
+- `pair_ecobee.py` - one-time pairing wizard
+- `ecobee_controller.py` - the library, CLI, and GUI (all in one)
+- `requirements.txt` - dependencies
+- `.gitignore` - keeps pairing credentials out of version control
 
 ## Acknowledgements
 
