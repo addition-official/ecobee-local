@@ -274,6 +274,42 @@ class EcobeeController:
         threading.Thread(target=self._thread_main, daemon=True).start()
         self._loop_ready.wait(timeout=wait_timeout)
 
+    def stop(self, timeout=5.0):
+        """
+        Cleanly close all HomeKit connections and stop the background loop.
+        Safe to call more than once. Frees the connection slots on each
+        thermostat promptly instead of waiting for the process to exit.
+        """
+        if not self._started or self._loop is None:
+            return
+        loop = self._loop
+
+        async def _shutdown():
+            task = getattr(self, "_main_task", None)
+            if task is not None:
+                task.cancel()
+            for label in self.labels:
+                st = self._state.get(label, {})
+                pairing = st.get("pairing")
+                if pairing is not None:
+                    try:
+                        await pairing.close()
+                    except Exception:
+                        pass
+                    st["pairing"] = None
+                self.cache[label]["online"] = False
+
+        try:
+            fut = asyncio.run_coroutine_threadsafe(_shutdown(), loop)
+            fut.result(timeout=timeout)
+        except Exception:
+            pass
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except Exception:
+            pass
+        self._started = False
+
     def get_status(self, label=None):
         """
         Return cached status for one label, or all if label is None.
@@ -365,6 +401,25 @@ class EcobeeController:
         return self._run(
             self._set_int_char(label, "display_units", val), timeout=timeout)
 
+    # --- Celsius-direct setters (avoid the Fahrenheit round-trip) ---
+    def set_temp_c(self, label, temp_c, timeout=12.0):
+        """Set target temperature directly in Celsius (0.5-step)."""
+        return self._run(
+            self._set_temp_char(label, "target_temp", temp_c=temp_c),
+            timeout=timeout)
+
+    def set_heat_threshold_c(self, label, temp_c, timeout=12.0):
+        """Set heating threshold directly in Celsius (0.5-step)."""
+        return self._run(
+            self._set_temp_char(label, "heat_threshold", temp_c=temp_c),
+            timeout=timeout)
+
+    def set_cool_threshold_c(self, label, temp_c, timeout=12.0):
+        """Set cooling threshold directly in Celsius (0.5-step)."""
+        return self._run(
+            self._set_temp_char(label, "cool_threshold", temp_c=temp_c),
+            timeout=timeout)
+
     def set_target_humidity(self, label, percent, timeout=12.0):
         """
         Set the target relative humidity (percent), on models with a
@@ -403,7 +458,7 @@ class EcobeeController:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         self._loop_ready.set()
-        self._loop.create_task(self._main())
+        self._main_task = self._loop.create_task(self._main())
         self._loop.run_forever()
 
     async def _main(self):
@@ -702,8 +757,13 @@ class EcobeeController:
     async def _set_mode(self, label, mode_int):
         return await self._set_int_char(label, "mode", int(mode_int))
 
-    async def _set_temp_char(self, label, key, temp_f):
-        """Write a temperature characteristic (given in F, sent in C, 0.5 step)."""
+    async def _set_temp_char(self, label, key, temp_f=None, temp_c=None):
+        """
+        Write a temperature characteristic. Provide either temp_f (Fahrenheit,
+        converted to 0.5-step Celsius) or temp_c (Celsius, sent directly and
+        snapped to 0.5 steps). temp_c avoids the F round-trip so a Celsius user
+        can set exact half-degree values.
+        """
         st = self._state[label]
         async with st["lock"]:
             pairing = st["pairing"]
@@ -714,12 +774,18 @@ class EcobeeController:
                 return {"ok": False,
                         "error": f"this thermostat does not expose '{key}'"}
             aid, iid = ids[key]
+            if temp_c is not None:
+                c_val = round(float(temp_c) * 2) / 2
+            else:
+                c_val = _f_to_c_half(temp_f)
             try:
                 await asyncio.wait_for(
-                    pairing.put_characteristics([(aid, iid, _f_to_c_half(temp_f))]),
+                    pairing.put_characteristics([(aid, iid, c_val)]),
                     timeout=8.0,
                 )
-                self.cache[label][key] = int(temp_f)
+                # update cache in both units
+                self.cache[label][key] = _c_to_f(c_val)
+                self.cache[label][key + "_c"] = c_val
                 return {"ok": True}
             except Exception as e:
                 return {"ok": False, "error": f"{type(e).__name__}: {e}"}
@@ -912,12 +978,6 @@ def launch_gui(ec, poll_ms=2000):
         """Snap a typed Celsius value to HomeKit's 0.5 step."""
         return round(float(entered_c) * 2) / 2
 
-    def to_f(entered):
-        """Convert a number the user typed (in the current unit) to Fahrenheit."""
-        if ui["units"] == "C":
-            return int(round(float(entered) * 9 / 5 + 32))
-        return int(round(float(entered)))
-
     def unit_label():
         return "\u00b0C" if ui["units"] == "C" else "\u00b0F"
 
@@ -998,20 +1058,25 @@ def launch_gui(ec, poll_ms=2000):
 
                 def submit(*_):
                     try:
-                        hv = to_f(float(heat_e.get().strip()))
-                        cv = to_f(float(cool_e.get().strip()))
+                        h_typed = float(heat_e.get().strip())
+                        c_typed = float(cool_e.get().strip())
                     except ValueError:
                         err.config(text="Enter numbers for both.")
                         return
-                    if hv >= cv:
+                    if h_typed >= c_typed:
                         err.config(text="Heat must be lower than cool.")
                         return
                     pop.destroy()
                     status.config(text="\u25cf sending\u2026", fg="#d97706")
+                    in_c = ui["units"] == "C"
 
                     def work():
-                        r1 = ec.set_heat_threshold(label, hv)
-                        r2 = ec.set_cool_threshold(label, cv)
+                        if in_c:
+                            r1 = ec.set_heat_threshold_c(label, to_c_half(h_typed))
+                            r2 = ec.set_cool_threshold_c(label, to_c_half(c_typed))
+                        else:
+                            r1 = ec.set_heat_threshold(label, int(round(h_typed)))
+                            r2 = ec.set_cool_threshold(label, int(round(c_typed)))
                         ok = r1.get("ok") and r2.get("ok")
                         errmsg = r1.get("error") or r2.get("error")
                         root.after(0, lambda: status.config(
@@ -1034,16 +1099,19 @@ def launch_gui(ec, poll_ms=2000):
                 err.pack()
 
                 def submit(*_):
+                    raw = entry.get().strip()
                     try:
-                        val = to_f(float(entry.get().strip()))
+                        typed = float(raw)
                     except ValueError:
                         err.config(text="Enter a number.")
                         return
                     pop.destroy()
                     status.config(text="\u25cf sending\u2026", fg="#d97706")
+                    in_c = ui["units"] == "C"
 
                     def work():
-                        res = ec.set_temp(label, val)
+                        res = (ec.set_temp_c(label, to_c_half(typed)) if in_c
+                               else ec.set_temp(label, int(round(typed))))
                         ok = res.get("ok")
                         root.after(0, lambda: status.config(
                             text="\u25cf updated" if ok else f"\u25cf {res.get('error')}",
@@ -1361,6 +1429,15 @@ def launch_gui(ec, poll_ms=2000):
     root.geometry(f"{win_w}x{win_h}")
     root.minsize(300, 460)
 
+    def on_close():
+        # free the thermostats' HomeKit connection slots on exit
+        try:
+            ec.stop()
+        except Exception:
+            pass
+        root.destroy()
+    root.protocol("WM_DELETE_WINDOW", on_close)
+
     root.after(200, poll)
     root.mainloop()
 
@@ -1494,4 +1571,5 @@ if __name__ == "__main__":
             while True:
                 time.sleep(3600)
         except KeyboardInterrupt:
-            pass
+            print("\nstopping...")
+            ec.stop()
