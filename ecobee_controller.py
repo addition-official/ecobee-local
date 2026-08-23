@@ -57,6 +57,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 from aiohomekit.controller import Controller
 from aiohomekit.controller.ip.pairing import IpPairing
@@ -81,6 +82,19 @@ _UUID = {
 }
 # * only present on models with a humidifier/dehumidifier (e.g. Smart Premium).
 #   Setters/readers skip it gracefully when the characteristic is absent.
+
+# ecobee VENDOR-specific comfort-profile characteristics. These are NOT standard
+# HomeKit; they use ecobee's own full UUIDs and only appear on models that
+# support comfort profiles (Smart/Premium, not the bare 3 lite). Verified by
+# hardware testing and corroborated by the Home Assistant HomeKit-controller
+# project (home-assistant/core issue #99524), which reports the same UUIDs and
+# 0=home/1=sleep/2=away mapping. Value 3 is a hold (manual hold, "vacation", or
+# any custom comfort profile all read back as 3, since HomeKit exposes only
+# these four slots). Read via _COMFORT_READ, set via _COMFORT_WRITE.
+_COMFORT_READ = "B7DDB9A3-54BB-4572-91D2-F1F5B0510F8C"   # current profile (r)
+_COMFORT_WRITE = "1B300BC2-CFFC-47FF-89F9-BD6CCF5F2853"  # set profile (w)
+_COMFORT_NAMES = {0: "home", 1: "sleep", 2: "away", 3: "hold"}
+_COMFORT_VALUES = {v: k for k, v in _COMFORT_NAMES.items()}
 
 # Characteristics that live on remote SENSOR accessories (and the thermostat's
 # own built-in sensor). Standard Apple UUIDs, so uniform across models.
@@ -118,6 +132,8 @@ def _blank_cache():
     for k in _INT_KEYS:
         entry[k] = "--"
     entry["humidity"] = "--"
+    entry["comfort_mode"] = "--"   # home/sleep/away/hold, or -- if unsupported
+    entry["comfort_raw"] = None
     entry["sensors"] = []  # list of remote-sensor dicts (Premium etc.)
     return entry
 
@@ -167,6 +183,12 @@ class EcobeeController:
     MODE_COOL = 2
     MODE_AUTO = 3
 
+    # ecobee comfort profiles (vendor feature; Premium/Smart, not the 3 lite)
+    COMFORT_HOME = "home"
+    COMFORT_SLEEP = "sleep"
+    COMFORT_AWAY = "away"
+    COMFORT_HOLD = "hold"
+
     def __init__(self, pair_files=None, app_folder=None, poll_interval=30.0,
                  names=None, debug=False):
         """
@@ -198,6 +220,11 @@ class EcobeeController:
         self.labels = list(self._pair_paths.keys())
 
         self.cache = {label: _blank_cache() for label in self.labels}
+
+        # per-label monotonic timestamp: until this time, device comfort
+        # read-backs are ignored so a just-set profile isn't clobbered by a
+        # lagging read (see _apply_reading and _set_comfort).
+        self._comfort_hold = {label: 0 for label in self.labels}
 
         self._state = {
             label: {"pairing": None, "ids": None, "sensors": None, "lock": None}
@@ -285,6 +312,8 @@ class EcobeeController:
         loop = self._loop
 
         async def _shutdown():
+            # cancel the background health loop so it isn't left pending when
+            # the loop stops (avoids a harmless "Task was destroyed" warning)
             task = getattr(self, "_main_task", None)
             if task is not None:
                 task.cancel()
@@ -400,6 +429,36 @@ class EcobeeController:
         val = 1 if fahrenheit else 0
         return self._run(
             self._set_int_char(label, "display_units", val), timeout=timeout)
+
+    # --- comfort profiles (ecobee vendor feature; Premium/Smart only) ---
+    def get_comfort_mode(self, label):
+        """
+        Return the current comfort profile as a string: "home", "sleep",
+        "away", or "hold" (a manual hold, vacation, or any custom profile all
+        report as "hold", since HomeKit exposes only these four slots).
+        Returns "--" on models that don't expose comfort profiles (e.g. the
+        ecobee3 lite). Reads from cache; no device round-trip.
+        """
+        return self.cache.get(label, {}).get("comfort_mode", "--")
+
+    def set_comfort_mode(self, label, mode, timeout=12.0):
+        """
+        Switch the comfort profile. mode is one of "home", "sleep", "away",
+        or "hold" (or the COMFORT_* constants). "hold" holds the current
+        temperature. Returns {'ok': bool, ...}; returns an error dict on
+        models that don't expose comfort profiles.
+
+        Note: this cannot switch to a *custom* comfort profile (those aren't
+        addressable over HomeKit); it controls the three standard profiles
+        plus a generic hold.
+        """
+        key = str(mode).lower()
+        if key not in _COMFORT_VALUES:
+            return {"ok": False,
+                    "error": f"unknown comfort mode '{mode}'; "
+                             f"use home/sleep/away/hold"}
+        return self._run(
+            self._set_comfort(label, _COMFORT_VALUES[key]), timeout=timeout)
 
     # --- Celsius-direct setters (avoid the Fahrenheit round-trip) ---
     def set_temp_c(self, label, temp_c, timeout=12.0):
@@ -544,6 +603,18 @@ class EcobeeController:
                         break
             main_ids[key] = found
 
+        # comfort-profile characteristics: ecobee vendor UUIDs (full match).
+        # Only present on comfort-capable models; None on the bare 3 lite.
+        for key, full_uuid in (("comfort_read", _COMFORT_READ),
+                               ("comfort_write", _COMFORT_WRITE)):
+            found = None
+            if thermostat_srv is not None:
+                for ch in thermostat_srv.characteristics:
+                    if str(ch.type).upper() == full_uuid.upper():
+                        found = (thermostat_aid, ch.iid)
+                        break
+            main_ids[key] = found
+
         # sensor specs: per-accessory, grouped by SERVICE so a multi-service
         # accessory (thermostat with built-in occupancy) yields sensible groups.
         sensor_specs = []
@@ -588,7 +659,8 @@ class EcobeeController:
 
     def _wanted(self, main_ids, sensor_specs):
         """Flatten every (aid, iid) we want to read into a list."""
-        want = [v for v in main_ids.values() if v]
+        # comfort_write is write-only; never include it in a read/subscribe set
+        want = [v for k, v in main_ids.items() if v and k != "comfort_write"]
         for spec in sensor_specs:
             for key, val in spec.items():
                 if key == "_builtin":
@@ -618,6 +690,29 @@ class EcobeeController:
                 cache[key] = int(round(raw))
             else:  # integer state characteristics
                 cache[key] = int(raw)
+
+        # comfort profile (ecobee vendor characteristic), if this model has it.
+        # Guard: if the user set a comfort mode within the last few seconds,
+        # don't let a device read-back overwrite it. Some models (notably the
+        # ecobee3 lite) briefly keep reporting the OLD profile after a change
+        # (a known ecobee reporting lag), which would otherwise make the UI
+        # flip back to the previous value. The optimistic value set in
+        # _set_comfort wins until the device catches up.
+        cid = main_ids.get("comfort_read")
+        hold_until = self._comfort_hold.get(label, 0)
+        if time.monotonic() < hold_until:
+            pass  # keep the optimistic value; skip this read-back
+        elif cid and cid in readings:
+            raw = readings[cid]["value"]
+            try:
+                cache["comfort_mode"] = _COMFORT_NAMES.get(int(raw), "hold")
+                cache["comfort_raw"] = int(raw)
+            except (TypeError, ValueError):
+                cache["comfort_mode"] = "--"
+                cache["comfort_raw"] = None
+        else:
+            cache["comfort_mode"] = "--"   # not supported on this model
+            cache["comfort_raw"] = None
 
         # build the sensors list fresh each read
         sensors = []
@@ -808,6 +903,35 @@ class EcobeeController:
                     timeout=8.0,
                 )
                 self.cache[label][key] = int(value)
+                return {"ok": True}
+            except Exception as e:
+                return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    async def _set_comfort(self, label, value):
+        """Write the comfort-profile selector (ecobee vendor characteristic)."""
+        st = self._state[label]
+        async with st["lock"]:
+            pairing = st["pairing"]
+            ids = st["ids"]
+            if pairing is None:
+                return {"ok": False, "error": "not connected"}
+            if not ids or not ids.get("comfort_write"):
+                return {"ok": False,
+                        "error": "this thermostat does not expose comfort "
+                                 "profiles"}
+            aid, iid = ids["comfort_write"]
+            try:
+                await asyncio.wait_for(
+                    pairing.put_characteristics([(aid, iid, int(value))]),
+                    timeout=8.0,
+                )
+                # reflect immediately; the device will also push the new value
+                self.cache[label]["comfort_mode"] = _COMFORT_NAMES.get(
+                    int(value), "hold")
+                self.cache[label]["comfort_raw"] = int(value)
+                # protect this optimistic value from lagging read-backs for a
+                # short window (some models report the old profile briefly)
+                self._comfort_hold[label] = time.monotonic() + 12.0
                 return {"ok": True}
             except Exception as e:
                 return {"ok": False, "error": f"{type(e).__name__}: {e}"}
@@ -1184,6 +1308,42 @@ def launch_gui(ec, poll_ms=2000):
                 root.after(800, lambda: refresh_one(label))
             run_bg(work)
 
+        # comfort-profile buttons. HIDDEN by default and toggled per-thermostat
+        # in Settings, because comfort reporting over HomeKit is buggy or wrong
+        # on some models (notably the ecobee3 lite, a known ecobee firmware bug
+        # where the mode always reads back as one value). On models where it
+        # works (Premium/Smart) the user can switch it on. The library API
+        # (get/set_comfort_mode) always works regardless of this GUI toggle.
+        comfort_btns = {}
+        crow = tk.Frame(card, bg="white")
+        # NOT packed yet; shown only when the user enables it in Settings
+        tk.Label(crow, text="Comfort", bg="white", fg="#888",
+                 font=("Segoe UI", 10)).pack(side="left", padx=(0, 6))
+
+        def set_comfort(mode):
+            status.config(text="\u25cf comfort\u2026", fg="#d97706")
+
+            def work():
+                res = ec.set_comfort_mode(label, mode)
+                ok = res.get("ok")
+                root.after(0, lambda: status.config(
+                    text="\u25cf updated" if ok else f"\u25cf {res.get('error')}",
+                    fg="#16a34a" if ok else "#dc2626"))
+                root.after(800, lambda: refresh_one(label))
+            run_bg(work)
+
+        for cname, cval in [("Home", "home"), ("Sleep", "sleep"),
+                            ("Away", "away")]:
+            b = tk.Button(crow, text=cname, width=5, relief="flat",
+                          bg="#eee", fg="#111", font=("Segoe UI", 9),
+                          command=lambda m=cval: set_comfort(m))
+            b.pack(side="left", padx=2)
+            comfort_btns[cval] = b
+
+        # shown by default; a per-thermostat toggle in Settings can hide it for
+        # models whose firmware reports comfort incorrectly (see Settings note)
+        crow.pack(pady=(0, 6))
+
         # optional: target humidity, only on models that expose it
         st0 = ec.get_status(label)
         if st0.get("target_humidity") != "--":
@@ -1255,6 +1415,8 @@ def launch_gui(ec, poll_ms=2000):
         widgets[label] = {
             "cur": cur, "sub": sub, "tgt": tgt, "hum_val": hum_val,
             "mode_btns": mode_btns, "fan_btns": fan_btns,
+            "comfort_btns": comfort_btns, "comfort_row": crow,
+            "comfort_shown": True,
             "sensors": sensors_lbl, "status": status,
         }
 
@@ -1303,6 +1465,15 @@ def launch_gui(ec, poll_ms=2000):
         for fv, b in w["fan_btns"].items():
             if tf != "--" and fv == tf:
                 b.config(bg="#555555", fg="white")
+            else:
+                b.config(bg="#eee", fg="#111")
+
+        # highlight the active comfort profile (green when it's one of the three;
+        # when in "hold"/custom, none is highlighted)
+        cm = st.get("comfort_mode")
+        for cv, b in w.get("comfort_btns", {}).items():
+            if cm == cv:
+                b.config(bg="#16a34a", fg="white")
             else:
                 b.config(bg="#eee", fg="#111")
 
@@ -1403,6 +1574,49 @@ def launch_gui(ec, poll_ms=2000):
                  bg="white", fg="#999", font=("Segoe UI", 8),
                  justify="center").pack(padx=32, pady=(10, 0))
 
+        # --- per-thermostat comfort-control toggles ---
+        ttk_sep = tk.Frame(pop, bg="#e5e5ea", height=1)
+        ttk_sep.pack(fill="x", padx=24, pady=(16, 8))
+        tk.Label(pop, text="Comfort controls", bg="white", fg="#666",
+                 font=("Segoe UI", 10)).pack(padx=32)
+        tk.Label(pop, text="Home / Sleep / Away switching. This depends on the\n"
+                          "thermostat's firmware; if switching doesn't reflect\n"
+                          "correctly on a thermostat, turn it off for that one.",
+                 bg="white", fg="#999", font=("Segoe UI", 8),
+                 justify="center").pack(padx=32, pady=(2, 6))
+
+        def make_comfort_toggle(lbl):
+            w = widgets[lbl]
+            rowf = tk.Frame(pop, bg="white")
+            rowf.pack(padx=32, pady=2)
+            tk.Label(rowf, text=ec.get_name(lbl), bg="white", fg="#111",
+                     font=("Segoe UI", 10), width=14, anchor="w").pack(side="left")
+            btn = tk.Button(rowf, width=8, relief="flat")
+
+            def refresh_btn():
+                on = w["comfort_shown"]
+                btn.config(text="On" if on else "Off",
+                           bg="#16a34a" if on else "#eee",
+                           fg="white" if on else "#111")
+
+            def toggle():
+                if w["comfort_shown"]:
+                    w["comfort_row"].pack_forget()
+                    w["comfort_shown"] = False
+                else:
+                    # place the comfort row just above the sensors area
+                    w["comfort_row"].pack(pady=(0, 6), before=w["sensors"])
+                    w["comfort_shown"] = True
+                    paint(lbl, ec.get_status(lbl))  # highlight current profile
+                refresh_btn()
+
+            btn.config(command=toggle)
+            refresh_btn()
+            btn.pack(side="left")
+
+        for lbl in ec.labels:
+            make_comfort_toggle(lbl)
+
         note.pack(pady=(8, 0))
         tk.Button(pop, text="Close", relief="flat", bg="#eee", fg="#111",
                   width=10, command=pop.destroy).pack(pady=16)
@@ -1425,7 +1639,7 @@ def launch_gui(ec, poll_ms=2000):
     # size the window: width scales with number of cards, fixed comfortable height
     n = max(1, len(ec.labels))
     win_w = min(n * 284 + 20, 1400)   # ~284px per card column, capped
-    win_h = 500
+    win_h = 600
     root.geometry(f"{win_w}x{win_h}")
     root.minsize(300, 460)
 
@@ -1482,6 +1696,11 @@ if __name__ == "__main__":
         help="set target humidity %% (Premium etc.; requires --label)",
     )
     parser.add_argument(
+        "--set-comfort", choices=["home", "sleep", "away", "hold"],
+        default=None,
+        help="set comfort profile (Premium/Smart only; requires --label)",
+    )
+    parser.add_argument(
         "--raw", action="store_true",
         help="with --dump, do not truncate long values (e.g. status strings)",
     )
@@ -1521,7 +1740,7 @@ if __name__ == "__main__":
     # Did the user request a specific one-shot action?
     any_action = any(v is not None for v in (
         args.set_temp, args.set_mode, args.set_heat, args.set_cool,
-        args.set_fan, args.set_humidity))
+        args.set_fan, args.set_humidity, args.set_comfort))
 
     # Default (no action flags, not --headless): open the control window.
     if not any_action and not args.headless:
@@ -1552,6 +1771,9 @@ if __name__ == "__main__":
         if args.set_humidity is not None:
             print("set-humidity:",
                   ec.set_target_humidity(args.label, args.set_humidity))
+        if args.set_comfort is not None:
+            print("set-comfort:",
+                  ec.set_comfort_mode(args.label, args.set_comfort))
 
     for t in ec.list_thermostats():
         st = ec.get_status(t["label"])
