@@ -1,3 +1,5 @@
+[![PyPI](https://img.shields.io/pypi/v/ecobee-local)](https://pypi.org/project/ecobee-local/)
+
 # Local Ecobee Control (HomeKit)
 
 Control your Ecobee thermostat from Python over your local network, with **no cloud, no OAuth, no ecobee developer key, and no Home Assistant**. It talks to the thermostat directly using Apple's HomeKit Accessory Protocol (HAP) via [`aiohomekit`](https://github.com/Jc2k/aiohomekit).
@@ -14,6 +16,13 @@ Works with any HomeKit-capable Ecobee. Developed and tested against an **Ecobee3
 - Set target humidity on models that have a humidifier/dehumidifier (e.g. Smart Premium)
 - Fahrenheit or Celsius display, with exact half-degree Celsius setting
 - A live GUI that auto-updates, or a scriptable CLI, or an importable library
+
+## Install
+
+    pip install ecobee-local
+
+Or clone this repo and install the dependencies with
+`pip install -r requirements.txt` if you'd rather run the scripts directly.
 
 ## Requirements
 
