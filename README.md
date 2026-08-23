@@ -1,4 +1,4 @@
-[![PyPI](https://img.shields.io/pypi/v/ecobee-local)](https://pypi.org/project/ecobee-local/)
+[![PyPI](https://img.shields.io/pypi/v/ecobee-local?cacheSeconds=300)](https://pypi.org/project/ecobee-local/)
 
 # Local Ecobee Control (HomeKit)
 
