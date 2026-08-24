@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecobee-local"
+version = "1.1.0"
+description = "Control an Ecobee thermostat locally over HomeKit. No cloud, no developer key, no Home Assistant."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "addition-official" }]
+keywords = ["ecobee", "homekit", "thermostat", "smart-home", "aiohomekit", "local"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Home Automation",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+]
+dependencies = [
+    "aiohomekit>=3.0",
+    "zeroconf>=0.130",
+]
+
+[project.urls]
+Homepage = "https://github.com/addition-official/ecobee-local"
+Repository = "https://github.com/addition-official/ecobee-local"
+Issues = "https://github.com/addition-official/ecobee-local/issues"
+
+[project.scripts]
+ecobee-hub = "ecobee_local.controller:main"
+ecobee-pair = "ecobee_local.pair:main"
+
+[tool.setuptools]
+packages = ["ecobee_local"]

@@ -22,13 +22,12 @@ Works with any HomeKit-capable Ecobee. Developed and tested against an **Ecobee3
 
     pip install ecobee-local
 
-Or clone this repo and install the dependencies with
-`pip install -r requirements.txt` if you'd rather run the scripts directly.
+Or clone this repo and `pip install .` to build the exact package that's published to PyPI.
 
 ## Requirements
 
 - Python 3.9+
-- `pip install -r requirements.txt` (installs `aiohomekit` and `zeroconf`)
+- Dependencies `aiohomekit` and `zeroconf` (installed automatically by pip, or via `pip install -r requirements.txt`)
 - Tkinter for the GUI. It ships with Python on Windows and macOS. On some Linux distros it's a separate package: `sudo apt install python3-tk`.
 
 ## Setup
@@ -40,8 +39,10 @@ HomeKit accessories can only be paired to one "home" at a time. **If your Ecobee
 ### 2. Pair
 
 ```
-python pair_ecobee.py
+ecobee-pair
 ```
+
+(Cloned the repo instead of installing? Use `python -m ecobee_local.pair`.)
 
 The wizard will:
 - scan your network and show a numbered list of HomeKit devices (or filter by name),
@@ -56,8 +57,10 @@ Run it again for each additional thermostat. Files are saved to a per-user folde
 ### 3. Run
 
 ```
-python ecobee_controller.py
+ecobee-hub
 ```
+
+(Cloned instead of installed? Use `python -m ecobee_local.controller`.)
 
 With no arguments this opens the **control window** (one card per thermostat). On a headless machine with no display it automatically falls back to a background service instead.
 
@@ -66,25 +69,27 @@ With no arguments this opens the **control window** (one card per thermostat). O
 Everything the GUI does is also scriptable. All `--set-*` actions require `--label`.
 
 ```
-python ecobee_controller.py                                            # open the GUI
-python ecobee_controller.py --dump                                     # list every characteristic each thermostat exposes
-python ecobee_controller.py --dump --raw                               # same, without truncating long values
-python ecobee_controller.py --label main --set-temp 72
-python ecobee_controller.py --label main --set-mode 2                  # 0=off 1=heat 2=cool 3=auto
-python ecobee_controller.py --label main --set-heat 68 --set-cool 75   # auto-mode range
-python ecobee_controller.py --label main --set-fan on
-python ecobee_controller.py --label main --set-comfort away            # home/sleep/away/hold (supported models)
-python ecobee_controller.py --headless                                 # run as a background service (no GUI)
-python ecobee_controller.py --debug                                    # print connection/subscription events
-python ecobee_controller.py --folder PATH                              # use a different credentials folder
+ecobee-hub                                            # open the GUI
+ecobee-hub --dump                                     # list every characteristic each thermostat exposes
+ecobee-hub --dump --raw                               # same, without truncating long values
+ecobee-hub --label main --set-temp 72
+ecobee-hub --label main --set-mode 2                  # 0=off 1=heat 2=cool 3=auto
+ecobee-hub --label main --set-heat 68 --set-cool 75   # auto-mode range
+ecobee-hub --label main --set-fan on
+ecobee-hub --label main --set-comfort away            # home/sleep/away/hold (supported models)
+ecobee-hub --headless                                 # run as a background service (no GUI)
+ecobee-hub --debug                                    # print connection/subscription events
+ecobee-hub --folder PATH                              # use a different credentials folder
 ```
+
+(If you cloned rather than installed, replace `ecobee-hub` with `python -m ecobee_local.controller`.)
 
 `--dump` is the tool for discovering what your specific model exposes: it prints every accessory, service, and characteristic with its UUID, current value, permissions, and range.
 
 ## Use it as a library
 
 ```python
-from ecobee_controller import EcobeeController
+from ecobee_local import EcobeeController
 
 ec = EcobeeController.from_folder()   # auto-discovers every pairing file
 ec.start()
@@ -119,7 +124,7 @@ ec.stop()                                     # cleanly close connections
 
 ## How it works
 
-`pair_ecobee.py` performs the one-time HomeKit handshake and saves credentials. `ecobee_controller.py` uses those credentials to keep a persistent local connection per thermostat, subscribes for push updates (the device notifies it on change), and caches readings so the GUI/CLI never block on the network. Characteristics are located by their standard HomeKit type inside the thermostat's Thermostat service, so the same code works across different Ecobee models without hardcoding.
+`ecobee_local/pair.py` performs the one-time HomeKit handshake and saves credentials. `ecobee_local/controller.py` uses those credentials to keep a persistent local connection per thermostat, subscribes for push updates (the device notifies it on change), and caches readings so the GUI/CLI never block on the network. Characteristics are located by their standard HomeKit type inside the thermostat's Thermostat service, so the same code works across different Ecobee models without hardcoding.
 
 ## Notes and limitations
 
@@ -158,19 +163,26 @@ listens for commands on `ecobee/<label>/set/<thing>`:
     ecobee/<label>/set/humidity   40
     ecobee/<label>/set/comfort    away      (home/sleep/away/hold)
 
-## Files
+## Project layout
 
-- `pair_ecobee.py` - one-time pairing wizard
-- `ecobee_controller.py` - the library, CLI, and GUI (all in one)
-- `ecobee_mqtt.py` - optional MQTT bridge (experimental; needs `paho-mqtt` and a broker)
-- `requirements.txt` - dependencies
-- `.gitignore` - keeps pairing credentials out of version control
+```
+ecobee_local/
+    __init__.py       package entry, exports EcobeeController
+    controller.py     the library, CLI, and GUI
+    pair.py           the pairing wizard
+ecobee_mqtt.py        optional MQTT bridge (experimental)
+pyproject.toml        packaging / build config
+requirements.txt      dependencies
+LICENSE               MIT
+```
+
+Clone and `pip install .` to build exactly what's published to PyPI.
 
 ## A note on how this was built
 
 The hard part of this project, figuring out how to control an Ecobee locally
-over HomeKit at all, was months of my own trial and error. The pairing script
-(`pair_ecobee.py`) I wrote entirely myself.
+over HomeKit at all, was months of my own trial and error. The pairing wizard
+(`ecobee_local/pair.py`) I wrote entirely myself.
 
 I used AI assistance to help build out and refactor the controller, CLI, and
 GUI, and to write this README. The core discovery, the debugging direction,
