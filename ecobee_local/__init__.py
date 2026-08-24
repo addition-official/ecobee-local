@@ -13,5 +13,5 @@ Typical use:
 
 from .controller import EcobeeController, default_app_folder
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __all__ = ["EcobeeController", "default_app_folder"]

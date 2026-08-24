@@ -136,21 +136,24 @@ ec.stop()                                     # cleanly close connections
 
 ## Optional: MQTT bridge
 
-`ecobee_mqtt.py` is an optional companion script that mirrors your thermostats
+`ecobee_local/mqtt.py` is an optional MQTT bridge that mirrors your thermostats
 onto an MQTT broker, so other tools (Node-RED, dashboards, custom scripts, Home
-Assistant, etc.) can read state and send commands over MQTT. It's standalone
-and experimental; it uses this library under the hood.
+Assistant, etc.) can read state and send commands over MQTT. It's experimental,
+and it uses this library under the hood.
 
-Requires a running MQTT broker (e.g. [Mosquitto](https://mosquitto.org/)) and
-the paho client:
+Install it with the optional `mqtt` extra (pulls in `paho-mqtt`), and you'll
+also need a running MQTT broker such as [Mosquitto](https://mosquitto.org/):
 
-    pip install paho-mqtt
+    pip install "ecobee-local[mqtt]"
     winget install --id=EclipseFoundation.Mosquitto -e   # Windows, if you need a broker
 
 Run it:
 
-    python ecobee_mqtt.py                       # broker at localhost:1883
-    python ecobee_mqtt.py --host 192.168.1.50   # broker elsewhere
+    ecobee-mqtt                       # broker at localhost:1883
+    ecobee-mqtt --host 192.168.1.50   # broker elsewhere
+
+(Cloned instead of installed? `pip install ".[mqtt]"` from the repo, then
+`python -m ecobee_local.mqtt`.)
 
 It publishes state to `ecobee/<label>/<field>` (temperature, target, mode,
 humidity, fan, comfort, plus a full JSON blob at `ecobee/<label>/state`) and
@@ -170,7 +173,7 @@ ecobee_local/
     __init__.py       package entry, exports EcobeeController
     controller.py     the library, CLI, and GUI
     pair.py           the pairing wizard
-ecobee_mqtt.py        optional MQTT bridge (experimental)
+    mqtt.py           optional MQTT bridge (needs the [mqtt] extra)
 pyproject.toml        packaging / build config
 requirements.txt      dependencies
 LICENSE               MIT
@@ -182,7 +185,7 @@ Clone and `pip install .` to build exactly what's published to PyPI.
 
 The hard part of this project, figuring out how to control an Ecobee locally
 over HomeKit at all, was months of my own trial and error. The pairing wizard
-(`ecobee_local/pair.py`) I wrote entirely myself (and used AI to clean it up and make it readable..
+(`ecobee_local/pair.py`) I wrote entirely myself.
 
 I used AI assistance to help build out and refactor the controller, CLI, and
 GUI, and to write this README. The core discovery, the debugging direction,
