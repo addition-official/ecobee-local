@@ -1,3 +1,0 @@
-[console_scripts]
-ecobee-hub = ecobee_local.controller:main
-ecobee-pair = ecobee_local.pair:main
