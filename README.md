@@ -182,7 +182,7 @@ Clone and `pip install .` to build exactly what's published to PyPI.
 
 The hard part of this project, figuring out how to control an Ecobee locally
 over HomeKit at all, was months of my own trial and error. The pairing wizard
-(`ecobee_local/pair.py`) I wrote entirely myself.
+(`ecobee_local/pair.py`) I wrote entirely myself (and used AI to clean it up and make it readable..
 
 I used AI assistance to help build out and refactor the controller, CLI, and
 GUI, and to write this README. The core discovery, the debugging direction,
