@@ -793,6 +793,7 @@ class EcobeeController:
             print(f"[{label}] pairing file missing: {path}")
             self.cache[label]["online"] = False
             return False
+        pairing = None
         try:
             with open(path, "r") as f:
                 pdata = json.load(f)
@@ -837,6 +838,13 @@ class EcobeeController:
                       f"{ns} sensor(s))")
             return True
         except Exception as e:
+            # close the half-open pairing, otherwise aiohomekit keeps retrying
+            # it in the background forever and leaks a socket per attempt
+            if pairing is not None:
+                try:
+                    await pairing.close()
+                except Exception:
+                    pass
             print(f"[{label}] connect failed: {type(e).__name__}: {e}")
             self.cache[label]["online"] = False
             self._state[label]["pairing"] = None
@@ -972,9 +980,16 @@ class EcobeeController:
             creds = {k: v for k, v in pdata.items() if k not in _META_KEYS}
             controller = Controller()
             temp_pairing = IpPairing(controller, creds)
-            await asyncio.wait_for(
-                temp_pairing.list_accessories_and_characteristics(), timeout=15.0
-            )
+            try:
+                await asyncio.wait_for(
+                    temp_pairing.list_accessories_and_characteristics(), timeout=15.0
+                )
+            except Exception:
+                try:
+                    await temp_pairing.close()
+                except Exception:
+                    pass
+                raise
             pairing = temp_pairing
 
         rows = []
