@@ -126,8 +126,14 @@ def make_command_handler(ec, prefix):
             return
         label, thing = parts[1], parts[3]
 
+        # Everything below runs on paho's network thread. paho re-raises
+        # exceptions from callbacks, which kills that thread: the bridge would
+        # keep publishing state but never process another command. So every
+        # failure must end up as an error result here, never escape.
         try:
-            if thing == "target":
+            if label not in ec.labels:
+                res = {"ok": False, "error": f"unknown thermostat '{label}'"}
+            elif thing == "target":
                 res = ec.set_temp(label, int(round(float(payload))))
             elif thing == "target_c":
                 res = ec.set_temp_c(label, float(payload))
@@ -147,8 +153,12 @@ def make_command_handler(ec, prefix):
                 res = ec.set_comfort_mode(label, payload.lower())
             else:
                 res = {"ok": False, "error": f"unknown command '{thing}'"}
-        except ValueError:
+        except (ValueError, OverflowError):
             res = {"ok": False, "error": f"bad payload '{payload}'"}
+        except Exception as e:
+            res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        if not isinstance(res, dict):
+            res = {"ok": False, "error": f"unexpected result {res!r}"}
 
         if not res.get("ok"):
             print(f"[cmd] {label}/{thing}={payload!r} -> {res.get('error')}",

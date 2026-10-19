@@ -52,6 +52,7 @@ Modes (HomeKit TargetHeatingCoolingState): 0=off, 1=heat, 2=cool, 3=auto.
 """
 
 import asyncio
+import concurrent.futures
 import glob
 import json
 import os
@@ -533,7 +534,16 @@ class EcobeeController:
         if self._loop is None:
             return {"ok": False, "error": "controller not started"}
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return fut.result(timeout=timeout)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            # Return an error like every other failure (callers expect a
+            # {'ok': ...} dict) and cancel the call, so a write that was still
+            # waiting (e.g. behind a reconnect) doesn't land later after the
+            # caller was already told it failed.
+            fut.cancel()
+            return {"ok": False,
+                    "error": "timed out (thermostat busy or reconnecting)"}
 
     def _thread_main(self):
         self._loop = asyncio.new_event_loop()
@@ -549,7 +559,11 @@ class EcobeeController:
         if not getattr(self, "_auto_connect", True):
             return  # loop-only mode; caller will drive dump/etc. explicitly
         for label in self.labels:
-            await self._connect(label)
+            # go through _refresh (not _connect directly) so the initial
+            # connect holds the per-thermostat lock; otherwise a refresh or
+            # setter called right after start() can open a second connection
+            # at the same time and the first one is never closed
+            await self._refresh(label)
         await self._health_loop()
 
     def _find_ids(self, pairing):
@@ -698,20 +712,39 @@ class EcobeeController:
                 out.append(v)
         return out
 
+    @staticmethod
+    def _value(readings, cid):
+        """
+        Value of one characteristic from a get_characteristics() result, or
+        None if it's missing. A characteristic the device couldn't read comes
+        back as {"status": ..., "description": ...} with no "value" key (e.g. a
+        remote sensor that's out of range); treat that like a missing reading
+        so one bad value can't fail the whole read.
+        """
+        if not cid:
+            return None
+        entry = readings.get(cid)
+        if not isinstance(entry, dict):
+            return None
+        return entry.get("value")
+
     def _apply_reading(self, label, main_ids, sensor_specs, readings):
         cache = self.cache[label]
         for key in _UUID:
-            cid = main_ids.get(key)
-            if not cid or cid not in readings:
+            raw = self._value(readings, main_ids.get(key))
+            if raw is None:
                 continue
-            raw = readings[cid]["value"]
-            if key in _TEMP_KEYS:
-                cache[key] = _c_to_f(raw)      # Fahrenheit (rounded int)
-                cache[key + "_c"] = raw        # raw Celsius from the device
-            elif key == "humidity":
-                cache[key] = int(round(raw))
-            else:  # integer state characteristics
-                cache[key] = int(raw)
+            try:
+                if key in _TEMP_KEYS:
+                    f = _c_to_f(raw)               # Fahrenheit (rounded int)
+                    cache[key] = f
+                    cache[key + "_c"] = raw        # raw Celsius from the device
+                elif key == "humidity":
+                    cache[key] = int(round(raw))
+                else:  # integer state characteristics
+                    cache[key] = int(raw)
+            except (TypeError, ValueError, OverflowError):
+                continue  # unusable value; keep the previous reading
 
         # comfort profile (ecobee vendor characteristic), if this model has it.
         # Guard: if the user set a comfort mode within the last few seconds,
@@ -725,7 +758,7 @@ class EcobeeController:
         if time.monotonic() < hold_until:
             pass  # keep the optimistic value; skip this read-back
         elif cid and cid in readings:
-            raw = readings[cid]["value"]
+            raw = self._value(readings, cid)
             try:
                 cache["comfort_mode"] = _COMFORT_NAMES.get(int(raw), "hold")
                 cache["comfort_raw"] = int(raw)
@@ -746,26 +779,31 @@ class EcobeeController:
             if not s["name"]:
                 s["name"] = "Built-in" if s["builtin"] else f"Sensor {i+1}"
             # temperature -> F, plus raw Celsius
-            tid = spec.get("temperature")
-            if tid and tid in readings:
-                s["temperature"] = _c_to_f(readings[tid]["value"])
-                s["temperature_c"] = readings[tid]["value"]
-            else:
+            # (each value is read defensively: an out-of-range sensor can
+            # report an error for one characteristic, which should only blank
+            # that one field, not fail the whole read)
+            tval = self._value(readings, spec.get("temperature"))
+            try:
+                s["temperature"] = _c_to_f(tval) if tval is not None else None
+                s["temperature_c"] = tval
+            except (TypeError, ValueError, OverflowError):
                 s["temperature"] = None
                 s["temperature_c"] = None
             # occupancy / motion -> bool
             for k in ("occupancy", "motion"):
-                cid = spec.get(k)
-                if cid and cid in readings:
-                    v = readings[cid]["value"]
-                    s[k] = bool(v) if not isinstance(v, str) else (v.lower() == "y")
-                else:
+                v = self._value(readings, spec.get(k))
+                if v is None:
                     s[k] = None
+                else:
+                    s[k] = bool(v) if not isinstance(v, str) else (v.lower() == "y")
             # battery + low battery
-            bid = spec.get("battery")
-            s["battery"] = int(readings[bid]["value"]) if bid and bid in readings else None
-            lid = spec.get("low_battery")
-            s["low_battery"] = bool(readings[lid]["value"]) if lid and lid in readings else None
+            bval = self._value(readings, spec.get("battery"))
+            try:
+                s["battery"] = int(bval) if bval is not None else None
+            except (TypeError, ValueError, OverflowError):
+                s["battery"] = None
+            lval = self._value(readings, spec.get("low_battery"))
+            s["low_battery"] = bool(lval) if lval is not None else None
             sensors.append(s)
         cache["sensors"] = sensors
         cache["online"] = True
@@ -882,6 +920,25 @@ class EcobeeController:
     async def _set_mode(self, label, mode_int):
         return await self._set_int_char(label, "mode", int(mode_int))
 
+    @staticmethod
+    def _write_error(result):
+        """
+        put_characteristics() doesn't raise when the thermostat refuses a
+        value (e.g. out of range); it returns {(aid, iid): {"status": ...,
+        "description": ...}} with a non-zero status. Return an error string
+        for the first refused characteristic, or None if everything landed.
+        """
+        if not result:
+            return None
+        for info in result.values():
+            if not isinstance(info, dict):
+                continue
+            status = info.get("status")
+            if status not in (None, 0):
+                desc = info.get("description")
+                return f"thermostat rejected the value ({desc or status})"
+        return None
+
     async def _set_temp_char(self, label, key, temp_f=None, temp_c=None):
         """
         Write a temperature characteristic. Provide either temp_f (Fahrenheit,
@@ -904,10 +961,13 @@ class EcobeeController:
             else:
                 c_val = _f_to_c_half(temp_f)
             try:
-                await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     pairing.put_characteristics([(aid, iid, c_val)]),
                     timeout=8.0,
                 )
+                err = self._write_error(result)
+                if err:
+                    return {"ok": False, "error": err}
                 # update cache in both units
                 self.cache[label][key] = _c_to_f(c_val)
                 self.cache[label][key + "_c"] = c_val
@@ -928,10 +988,13 @@ class EcobeeController:
                         "error": f"this thermostat does not expose '{key}'"}
             aid, iid = ids[key]
             try:
-                await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     pairing.put_characteristics([(aid, iid, int(value))]),
                     timeout=8.0,
                 )
+                err = self._write_error(result)
+                if err:
+                    return {"ok": False, "error": err}
                 self.cache[label][key] = int(value)
                 return {"ok": True}
             except Exception as e:
@@ -951,10 +1014,14 @@ class EcobeeController:
                                  "profiles"}
             aid, iid = ids["comfort_write"]
             try:
-                await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     pairing.put_characteristics([(aid, iid, int(value))]),
                     timeout=8.0,
                 )
+                err = self._write_error(result)
+                if err:
+                    # refused: don't show it or start the read-back hold
+                    return {"ok": False, "error": err}
                 # reflect immediately; the device will also push the new value
                 self.cache[label]["comfort_mode"] = _COMFORT_NAMES.get(
                     int(value), "hold")
