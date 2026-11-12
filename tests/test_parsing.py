@@ -318,3 +318,36 @@ def test_from_folder_skips_json_that_is_not_a_pairing(tmp_path):
     (tmp_path / "broken.json").write_text("{not json")
     ec = EcobeeController.from_folder(app_folder=str(tmp_path))
     assert ec.labels == ["main", "up"]
+
+
+@pytest.mark.parametrize("label, name, expected", [
+    (["a"], "Den", ("den", "Den")),        # unusable _label -> filename
+    (5, None, ("den", "den")),
+    ("", "", ("den", "den")),
+    ("  ", 7, ("den", "den")),
+    ("up", {"x": 1}, ("up", "up")),         # unusable _name -> label
+])
+def test_read_meta_ignores_non_text_metadata(tmp_path, label, name,
+                                             expected):
+    p = write_pair_file(tmp_path, "den.json", label=label, name=name)
+    assert c._read_meta(str(p)) == expected
+
+
+def test_from_folder_with_odd_labels(tmp_path):
+    write_pair_file(tmp_path, "a.json", label=["x"])
+    write_pair_file(tmp_path, "b.json", label=5)
+    ec = EcobeeController.from_folder(app_folder=str(tmp_path))
+    assert ec.labels == ["a", "b"]
+
+
+def test_from_folder_never_drops_a_thermostat(tmp_path, capsys):
+    # "x" from b.json collides and becomes x_b, which 0.json already uses
+    write_pair_file(tmp_path, "0.json", label="x_b")
+    write_pair_file(tmp_path, "1.json", label="x")
+    write_pair_file(tmp_path, "b.json", label="x")
+    ec = EcobeeController.from_folder(app_folder=str(tmp_path))
+    assert len(ec.labels) == 3 and len(set(ec.labels)) == 3
+    assert sorted(ec._pair_paths.values()) == sorted(
+        str(tmp_path / f) for f in ("0.json", "1.json", "b.json"))
+    err = capsys.readouterr().err
+    assert "b.json" in err and "label 'x'" in err   # duplicate is reported

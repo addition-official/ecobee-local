@@ -39,6 +39,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - `ecobee-hub` on a machine with no display said "falling back to headless mode" but then exited. It now keeps running like `--headless`.
 - `ecobee-hub --dump` crashed with a traceback when a thermostat couldn't be reached. It now prints the error and goes on to the next thermostat.
 - `ecobee-hub` exited with code 0 even when a `--set-*` failed, or when there were no pairing files for a `--status`, `--dump`, `--watch` or `--set-*` run. Those now exit with 1. `--dump` combined with `--set-*` silently ignored the `--set-*`; it's now an error.
+- A pairing file whose `_label` wasn't text (e.g. a list or number in a hand-edited file) crashed folder discovery or `--label`. It now falls back to the filename. Two files with the same label could make a third thermostat disappear; every file now gets its own label, and duplicates print a warning saying which file got which label.
 - Stopping the controller while a thermostat was still connecting (or reconnecting) could leave a task running, so `stop()` took 2 extra seconds and Python printed "Task was destroyed but it is pending!" on exit.
 - `--dump` left a HomeKit connection open (and a socket leaking) when the thermostat didn't answer. The same leak was fixed for normal connections in 1.1.1.
 

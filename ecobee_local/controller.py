@@ -233,11 +233,17 @@ def _is_pairing_file(path):
 def _read_meta(path):
     """Return (label, name) from a pairing file, with sensible fallbacks."""
     stem = os.path.splitext(os.path.basename(path))[0]
+
+    def text(value):
+        # only non-empty strings count; anything else (lists, numbers, from a
+        # hand-edited file) falls back instead of breaking label handling
+        return value.strip() if isinstance(value, str) and value.strip() \
+            else None
     try:
         with open(path, "r") as f:
             data = json.load(f)
-        label = data.get("_label") or stem
-        name = data.get("_name") or label
+        label = text(data.get("_label")) or stem
+        name = text(data.get("_name")) or label
         return label, name
     except Exception:
         return stem, stem
@@ -372,7 +378,16 @@ class EcobeeController:
                 continue
             label, _ = _read_meta(path)
             if label in pair_files:
-                label = f"{label}_{os.path.splitext(base)[0]}"
+                wanted = label
+                label = f"{wanted}_{os.path.splitext(base)[0]}"
+                n = 2
+                while label in pair_files:
+                    label = f"{wanted}_{os.path.splitext(base)[0]}_{n}"
+                    n += 1
+                print(f"[ecobee-local] warning: {base} also uses label "
+                      f"'{wanted}' (already taken by "
+                      f"{os.path.basename(pair_files[wanted])}); "
+                      f"using '{label}' for it", file=sys.stderr)
             pair_files[label] = path
         return cls(pair_files, app_folder=folder, **kwargs)
 
