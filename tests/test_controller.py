@@ -367,3 +367,51 @@ def test_every_read_failing_keeps_connection(connected, device):
     st = connected.get_status("main")
     assert st["online"] is True and st["target_temp"] == 72
     assert len(device.pairings) == 1
+
+
+# --------------------------------------------- writes the thermostat rejects
+
+@pytest.mark.parametrize("call, cid, key, before", [
+    (lambda ec: ec.set_temp("main", 90), TARGET_TEMP, "target_temp", 72),
+    (lambda ec: ec.set_temp_c("main", 40), TARGET_TEMP, "target_temp", 72),
+    (lambda ec: ec.set_heat_threshold("main", 40), HEAT_THRESHOLD,
+     "heat_threshold", 68),
+    (lambda ec: ec.set_mode("main", 7), MODE, "mode", 1),
+    (lambda ec: ec.set_fan("main", False), TARGET_FAN, "target_fan", 1),
+])
+def test_rejected_write_reports_failure(connected, device, call, cid, key,
+                                        before):
+    # aiohomekit does NOT raise when the thermostat rejects a write; it
+    # returns {(aid, iid): {"status": ..., "description": ...}}
+    device.write_errors = {cid: -70410}
+    res = call(connected)
+    assert res["ok"] is False
+    assert "Value supplied is not valid" in res["error"]
+    assert "-70410" in res["error"]
+    assert connected.cache["main"][key] == before
+
+
+def test_rejected_comfort_write(connected, device):
+    device.write_errors = {COMFORT_WRITE: -70404}
+    res = connected.set_comfort_mode("main", "away")
+    assert res["ok"] is False and "-70404" in res["error"]
+    assert connected.get_comfort_mode("main") == "home"
+    assert connected.cache["main"]["comfort_raw"] == 0
+    # no optimistic hold either: a change made elsewhere shows up right away
+    device.values[COMFORT_READ] = 1
+    connected.refresh("main")
+    assert connected.get_comfort_mode("main") == "sleep"
+
+
+def test_write_with_success_status_is_ok(connected, device, monkeypatch):
+    # some firmwares answer every write with a status, 0 meaning success
+    pairing = device.pairings[0]
+    real_put = pairing.put_characteristics
+
+    async def put(chars):
+        await real_put(chars)
+        return {(aid, iid): {"status": 0, "description": "Success"}
+                for aid, iid, _ in chars}
+    monkeypatch.setattr(pairing, "put_characteristics", put)
+    assert connected.set_temp("main", 70) == {"ok": True}
+    assert connected.cache["main"]["target_temp"] == 70

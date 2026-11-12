@@ -174,6 +174,21 @@ def _has_value(readings, cid):
     return bool(cid) and "value" in (readings.get(cid) or {})
 
 
+def _write_error(result):
+    """
+    Return an error message if the thermostat rejected a write, else None.
+    aiohomekit's put_characteristics does not raise on rejection: it returns
+    {(aid, iid): {"status": <code>, "description": ...}} for the
+    characteristics that failed (status 0, when present, means success).
+    """
+    for cid, info in (result or {}).items():
+        status = (info or {}).get("status", 0)
+        if status:
+            desc = info.get("description") or "unknown error"
+            return f"thermostat rejected the write: {desc} (status {status})"
+    return None
+
+
 def _read_meta(path):
     """Return (label, name) from a pairing file, with sensible fallbacks."""
     stem = os.path.splitext(os.path.basename(path))[0]
@@ -920,10 +935,13 @@ class EcobeeController:
             else:
                 c_val = _f_to_c_half(temp_f)
             try:
-                await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     pairing.put_characteristics([(aid, iid, c_val)]),
                     timeout=8.0,
                 )
+                err = _write_error(result)
+                if err:
+                    return {"ok": False, "error": err}
                 # update cache in both units
                 self.cache[label][key] = _c_to_f(c_val)
                 self.cache[label][key + "_c"] = c_val
@@ -944,10 +962,13 @@ class EcobeeController:
                         "error": f"this thermostat does not expose '{key}'"}
             aid, iid = ids[key]
             try:
-                await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     pairing.put_characteristics([(aid, iid, int(value))]),
                     timeout=8.0,
                 )
+                err = _write_error(result)
+                if err:
+                    return {"ok": False, "error": err}
                 self.cache[label][key] = int(value)
                 return {"ok": True}
             except Exception as e:
@@ -967,10 +988,13 @@ class EcobeeController:
                                  "profiles"}
             aid, iid = ids["comfort_write"]
             try:
-                await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     pairing.put_characteristics([(aid, iid, int(value))]),
                     timeout=8.0,
                 )
+                err = _write_error(result)
+                if err:
+                    return {"ok": False, "error": err}
                 # reflect immediately; the device will also push the new value
                 self.cache[label]["comfort_mode"] = _COMFORT_NAMES.get(
                     int(value), "hold")
