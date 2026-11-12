@@ -6,6 +6,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 
 ### Added
 - Optional MQTT bridge: `pip install "ecobee-local[mqtt]"`, then run `ecobee-mqtt`. Publishes each thermostat's state to `ecobee/<label>/...` and accepts commands on `ecobee/<label>/set/<thing>`.
+- Test suite (`pytest`) that runs without a thermostat, broker or network.
 
 ### Fixed
 - `--dump` left a HomeKit connection open (and a socket leaking) when the thermostat didn't answer. The same leak was fixed for normal connections in 1.1.1.
