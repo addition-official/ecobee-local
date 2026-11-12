@@ -191,6 +191,7 @@ def test_unknown_label_is_a_clear_error(hub, device, capsys, extra):
     err = capsys.readouterr().err
     assert "no thermostat labelled 'mian'" in err
     assert "main" in err                   # lists the ones that exist
+    assert "usage:" not in err             # just the error, no wall of text
     assert device.writes == []
 
 
@@ -201,5 +202,7 @@ def test_unknown_label_is_a_clear_error(hub, device, capsys, extra):
 ])
 def test_action_without_label_is_an_error(hub, device, capsys, flag, value):
     assert hub(flag, value) == 2
-    assert f"{flag} needs --label" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert f"{flag} needs --label" in err
+    assert "usage:" not in err
     assert device.writes == []

@@ -1850,6 +1850,12 @@ def main():
     )
     args = parser.parse_args()
 
+    def fail(message):
+        # like parser.error(), minus the full usage text, which only buries
+        # the one line that matters for these mistakes
+        print(f"{parser.prog}: error: {message}", file=sys.stderr)
+        sys.exit(2)
+
     # one-shot actions change a specific thermostat, so they need --label
     actions = {
         "--set-temp": args.set_temp, "--set-mode": args.set_mode,
@@ -1860,7 +1866,7 @@ def main():
     if not args.label:
         for flag, value in actions.items():
             if value is not None:
-                parser.error(f"{flag} needs --label (which thermostat?)")
+                fail(f"{flag} needs --label (which thermostat?)")
 
     ec = EcobeeController.from_folder(app_folder=args.folder, debug=args.debug)
     if not ec.labels:
@@ -1868,7 +1874,7 @@ def main():
               f"first, or point --folder at the folder that has them.")
         sys.exit(0)
     if args.label and args.label not in ec.labels:
-        parser.error(f"no thermostat labelled '{args.label}' "
+        fail(f"no thermostat labelled '{args.label}' "
                      f"(found: {', '.join(ec.labels)})")
 
     targets = [args.label] if args.label else list(ec.labels)
