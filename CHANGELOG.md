@@ -10,6 +10,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - `wait_ready()`: after `start()`, waits until every thermostat has connected (or failed to), so the first `get_status()` has real readings.
 - `ecobee-hub` commands no longer wait a fixed 6 seconds before acting; they continue as soon as the thermostats are connected, usually in a second or two.
 - `ecobee-hub --status` prints each thermostat's status and exits (add `--label` for just one). Before, seeing the status meant running `--headless` and pressing Ctrl+C.
+- `ecobee-hub --set-mode` accepts names: `off`, `heat`, `cool`, `auto`. The numbers 0-3 still work.
 - Releases are published to PyPI from GitHub Actions with trusted publishing. The sdist now includes the tests and this changelog.
 
 ### Fixed

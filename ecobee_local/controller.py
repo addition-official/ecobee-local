@@ -1813,6 +1813,21 @@ def launch_gui(ec, poll_ms=2000):
     root.mainloop()
 
 
+_MODE_NAMES = {"off": 0, "heat": 1, "cool": 2, "auto": 3}
+
+
+def _parse_mode(text):
+    """argparse type for --set-mode: a name (off/heat/cool/auto) or 0-3."""
+    import argparse
+    key = text.strip().lower()
+    if key in _MODE_NAMES:
+        return _MODE_NAMES[key]
+    if key in ("0", "1", "2", "3"):
+        return int(key)
+    raise argparse.ArgumentTypeError(
+        f"invalid mode '{text}': use off, heat, cool, auto or 0-3")
+
+
 def main():
     import argparse
     import time
@@ -1833,8 +1848,8 @@ def main():
         help="set target temperature in Fahrenheit (requires --label)",
     )
     parser.add_argument(
-        "--set-mode", type=int, default=None, metavar="0-3",
-        help="set mode: 0=off 1=heat 2=cool 3=auto (requires --label)",
+        "--set-mode", type=_parse_mode, default=None, metavar="MODE",
+        help="set mode: off, heat, cool or auto (or 0-3) (requires --label)",
     )
     parser.add_argument(
         "--set-heat", type=int, default=None, metavar="F",

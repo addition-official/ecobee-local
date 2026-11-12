@@ -244,3 +244,21 @@ def test_status_for_one_label(hub, device, pair_folder, capsys):
 def test_one_shot_action_closes_connections(hub, device):
     hub("--label", "main", "--set-temp", "70")
     assert all(p.closed for p in device.pairings)
+
+
+# ------------------------------------------------------ --set-mode by name
+
+@pytest.mark.parametrize("value, mode", [
+    ("off", 0), ("heat", 1), ("COOL", 2), ("Auto", 3),
+    ("0", 0), ("1", 1), ("3", 3),             # numbers still work
+])
+def test_set_mode_by_name_or_number(hub, device, value, mode):
+    hub("--label", "main", "--set-mode", value)
+    assert (*MODE, mode) in device.writes
+
+
+@pytest.mark.parametrize("value", ["warm", "4", "-1", "1.5", ""])
+def test_set_mode_rejects_others(hub, device, capsys, value):
+    assert hub("--label", "main", "--set-mode", value) == 2
+    assert "off, heat, cool, auto or 0-3" in capsys.readouterr().err
+    assert device.writes == []
