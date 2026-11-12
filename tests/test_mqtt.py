@@ -44,9 +44,10 @@ class FakeEC:
 
 
 class Msg:
-    def __init__(self, topic, payload):
+    def __init__(self, topic, payload, retain=False):
         self.topic = topic
         self.payload = payload.encode() if isinstance(payload, str) else payload
+        self.retain = retain
 
 
 def send(ec, topic, payload, prefix="ecobee"):
@@ -331,3 +332,87 @@ def test_non_dict_result_is_reported(capsys):
     ec.result = None
     send(ec, "ecobee/main/set/target", "70")
     assert "unexpected result None" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------- review fixes
+
+@pytest.mark.parametrize("payload", ["off", "0", "", "onn", "true"])
+def test_fan_only_accepts_auto_or_on(payload, capsys):
+    ec = FakeEC()
+    send(ec, "ecobee/main/set/fan", payload)
+    assert ec.calls == []            # used to turn the fan ON
+    assert "bad fan" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("payload, mode", [("2", 2), ("0", 0), ("3", 3)])
+def test_mode_accepts_numbers(payload, mode):
+    ec = FakeEC()
+    send(ec, "ecobee/main/set/mode", payload)
+    assert ec.calls == [("set_mode", "main", mode)]
+
+
+def test_prefix_with_slashes():
+    ec = FakeEC()
+    send(ec, "home/ecobee/main/set/target", "70", prefix="home/ecobee")
+    assert ec.calls == [("set_temp", "main", 70)]
+    for topic in ["home/ecobeeX/main/set/target", "home/ecobee/main/set",
+                  "ecobee/main/set/target", "home/ecobee/main/x/target"]:
+        send(ec, topic, "70", prefix="home/ecobee")
+    assert len(ec.calls) == 1
+
+
+def test_retained_commands_are_ignored(capsys):
+    ec = FakeEC()
+    m.make_command_handler(ec, "ecobee")(
+        None, None, Msg("ecobee/main/set/mode", "off", retain=True))
+    assert ec.calls == []
+    assert "retained" in capsys.readouterr().err
+
+
+def test_broker_text_is_escaped_in_logs(capsys):
+    ec = FakeEC()
+    send(ec, "ecobee/\x1b[2J/set/target", "70")
+    send(ec, "ecobee/main/set/mode", "\x1b[31mred")
+    err = capsys.readouterr().err
+    assert "\x1b" not in err            # no raw escape codes
+    assert "\\x1b" in err               # shown escaped instead
+
+
+def test_bridge_skips_labels_mqtt_cannot_use(bridge, capsys):
+    ec, client, _, run = bridge
+    ec.labels = ["main", "a+b", "c/d", "e#"]
+    run()
+    topics = [t for t, _, _ in client.published]
+    assert "ecobee/main/online" in topics
+    assert not any("a+b" in t or "c/d" in t or "e#" in t for t in topics)
+    err = capsys.readouterr().err
+    for bad in ("a+b", "c/d", "e#"):
+        assert f"'{bad}'" in err
+
+
+def test_bridge_keeps_going_if_a_publish_fails(bridge, capsys):
+    ec, client, _, run = bridge
+    ec.labels = ["main", "up"]
+
+    def flaky_publish(topic, payload, retain=False):
+        if topic.startswith("ecobee/main/"):
+            raise ValueError("broker said no")
+        client.published.append((topic, payload, retain))
+    client.publish = flaky_publish
+    run()
+    assert any(t.startswith("ecobee/up/") for t, _, _ in client.published)
+    assert "broker said no" in capsys.readouterr().err
+
+
+def test_password_from_environment(bridge, monkeypatch):
+    ec, client, _, run = bridge
+    monkeypatch.setenv("ECOBEE_MQTT_PASSWORD", "from-env")
+    run("--username", "u")
+    assert client.auth == ("u", "from-env")
+
+
+def test_password_option_wins_over_environment(bridge, monkeypatch):
+    ec, client, _, run = bridge
+    monkeypatch.setenv("ECOBEE_MQTT_PASSWORD", "from-env")
+    run("--username", "u", "--password", "typed")
+    assert client.auth == ("u", "typed")

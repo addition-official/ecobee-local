@@ -46,6 +46,7 @@ topics are plain and documented above so any MQTT client can use them.
 
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -121,13 +122,25 @@ def make_command_handler(ec, prefix):
     def on_message(client, userdata, msg):
         topic = msg.topic
         payload = msg.payload.decode("utf-8", "replace").strip()
-        # expected: <prefix>/<label>/set/<thing>
-        parts = topic.split("/")
-        if len(parts) != 4 or parts[0] != prefix or parts[2] != "set":
+        # expected: <prefix>/<label>/set/<thing>; the prefix may itself
+        # contain "/" (e.g. home/ecobee)
+        if not topic.startswith(prefix + "/"):
             return
-        label, thing = parts[1], parts[3]
+        parts = topic[len(prefix) + 1:].split("/")
+        if len(parts) != 3 or parts[1] != "set":
+            return
+        label, thing = parts[0], parts[2]
+        # (text from the broker is logged with !r, so control characters
+        # can't mess with the terminal or log)
+        if getattr(msg, "retain", False):
+            # a retained command would be replayed on every reconnect, long
+            # after whoever sent it meant it; commands must be live messages
+            print(f"[cmd] ignored retained command on {topic!r} "
+                  f"(publish commands without the retain flag)",
+                  file=sys.stderr)
+            return
         if label not in ec.labels:
-            print(f"[cmd] unknown thermostat '{label}' in {topic}; ignored "
+            print(f"[cmd] unknown thermostat {label!r} in {topic!r}; ignored "
                   f"(known: {', '.join(ec.labels) or 'none'})",
                   file=sys.stderr)
             return
@@ -142,23 +155,30 @@ def make_command_handler(ec, prefix):
             elif thing == "target_c":
                 res = ec.set_temp_c(label, float(payload))
             elif thing == "mode":
-                m = STR_TO_MODE.get(payload.lower())
+                key = payload.lower()
+                m = STR_TO_MODE.get(key)
+                if m is None and key in ("0", "1", "2", "3"):
+                    m = int(key)
                 res = (ec.set_mode(label, m) if m is not None
-                       else {"ok": False, "error": f"bad mode '{payload}'"})
+                       else {"ok": False, "error": f"bad mode {payload!r}"})
             elif thing == "heat":
                 res = ec.set_heat_threshold(label, int(round(float(payload))))
             elif thing == "cool":
                 res = ec.set_cool_threshold(label, int(round(float(payload))))
             elif thing == "fan":
-                res = ec.set_fan(label, payload.lower() == "auto")
+                fan = payload.lower()
+                res = (ec.set_fan(label, fan == "auto")
+                       if fan in ("auto", "on")
+                       else {"ok": False,
+                             "error": f"bad fan {payload!r} (use auto or on)"})
             elif thing == "humidity":
                 res = ec.set_target_humidity(label, int(round(float(payload))))
             elif thing == "comfort":
                 res = ec.set_comfort_mode(label, payload.lower())
             else:
-                res = {"ok": False, "error": f"unknown command '{thing}'"}
+                res = {"ok": False, "error": f"unknown command {thing!r}"}
         except (ValueError, OverflowError):
-            res = {"ok": False, "error": f"bad payload '{payload}'"}
+            res = {"ok": False, "error": f"bad payload {payload!r}"}
         except Exception as e:
             res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
         if not isinstance(res, dict):
@@ -177,7 +197,9 @@ def main():
     ap.add_argument("--host", default="localhost", help="MQTT broker host")
     ap.add_argument("--port", type=int, default=1883, help="MQTT broker port")
     ap.add_argument("--username", default=None)
-    ap.add_argument("--password", default=None)
+    ap.add_argument("--password", default=None,
+                    help="broker password (or set ECOBEE_MQTT_PASSWORD, which "
+                         "keeps it out of the process list)")
     ap.add_argument("--prefix", default="ecobee", help="topic prefix")
     ap.add_argument("--interval", type=float, default=5.0,
                     help="seconds between state publishes")
@@ -189,7 +211,16 @@ def main():
     ec = EcobeeController.from_folder(app_folder=args.folder,
                                      comfort_warning=False)
     ec.start()
-    labels = list(ec.labels)
+    # MQTT topic levels can't contain "/", "+" or "#": such a label would
+    # crash publishing (wildcards) or split into extra levels ("/")
+    labels = []
+    for label in ec.labels:
+        if any(ch in label for ch in "/+#"):
+            print(f"skipping thermostat {label!r}: MQTT topics can't contain "
+                  f"'/', '+' or '#' (give it a different _label)",
+                  file=sys.stderr)
+        else:
+            labels.append(label)
     if not labels:
         print("no thermostats found; pair one first with ecobee-pair",
               file=sys.stderr)
@@ -200,7 +231,10 @@ def main():
 
     client = _make_client()
     if args.username:
-        client.username_pw_set(args.username, args.password)
+        password = args.password
+        if password is None:
+            password = os.environ.get("ECOBEE_MQTT_PASSWORD")
+        client.username_pw_set(args.username, password)
 
     # availability topic (last-will so consumers know if the bridge dies)
     avail_topic = f"{prefix}/bridge/online"
@@ -235,9 +269,15 @@ def main():
     try:
         while True:
             for label in labels:
-                st = ec.get_status(label)
-                for topic, payload in build_state_payloads(prefix, label, st):
-                    client.publish(topic, payload, retain=args.retain)
+                try:
+                    st = ec.get_status(label)
+                    for topic, payload in build_state_payloads(prefix, label,
+                                                               st):
+                        client.publish(topic, payload, retain=args.retain)
+                except Exception as e:
+                    # one bad publish shouldn't stop the bridge
+                    print(f"[{label}] publish failed: {type(e).__name__}: "
+                          f"{e}", file=sys.stderr)
             time.sleep(args.interval)
     except KeyboardInterrupt:
         print("\nstopping...")

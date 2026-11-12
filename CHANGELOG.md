@@ -11,6 +11,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - `ecobee-hub` commands no longer wait a fixed 6 seconds before acting; they continue as soon as the thermostats are connected, usually in a second or two.
 - `ecobee-hub --status` prints each thermostat's status and exits (add `--label` for just one). Before, seeing the status meant running `--headless` and pressing Ctrl+C.
 - `ecobee-hub --set-mode` accepts names: `off`, `heat`, `cool`, `auto`. The numbers 0-3 still work.
+- `ecobee-mqtt` reads the broker password from `ECOBEE_MQTT_PASSWORD` when `--password` isn't given, keeping it out of the process list.
 - `ecobee-hub --set-temp-c`, `--set-heat-c` and `--set-cool-c` set temperatures in Celsius (0.5° steps), like the library's `set_temp_c()` and friends.
 - `with EcobeeController.from_folder() as ec:` connects (waiting for the first readings) and always closes the connections at the end of the block, even if your code raises an error.
 - `ec.on_change(callback)`: `callback(label, status)` is called whenever a thermostat's status changes, from anywhere (the thermostat, the ecobee app, a schedule, a sensor, going offline, or your own commands). Returns a function that removes the callback.
@@ -43,6 +44,13 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - **Security:** `ecobee-pair` saved pairing files (which hold the thermostat's long-term keys) readable by every user on the machine. They're now saved readable only by you, and the default `ecobee-local` folder is made private too. Files from older versions keep their permissions; to fix them run `chmod 600 ~/ecobee-local/*.json` (or on your own folder).
 - `ecobee-pair` could lose the keys of a thermostat it had just paired, making you reset HomeKit on the thermostat: if saving failed (e.g. a filename in a folder that doesn't exist, or a full disk). Filenames are now checked before pairing, the file is written safely (all or nothing), and if saving still fails the keys are printed so you can save them yourself. A name like `Main.JSON` (which `ecobee-hub` couldn't find on Linux/macOS) is saved as `Main.json`.
 - `ecobee-pair`: Ctrl+C or Ctrl+D at a prompt printed a traceback; it now just says "aborted". One HomeKit device on the network with malformed mDNS data could stop the scan from finding others, and devices without an id were merged into one entry.
+- `ecobee-mqtt`:
+  - `set/fan` turned the fan on for any payload other than `auto`, including `off`. Only `auto` and `on` are accepted now.
+  - With a prefix containing `/` (e.g. `--prefix home/ecobee`), every command was silently ignored.
+  - A thermostat label containing `+` or `#` crashed the bridge (and one containing `/` couldn't be controlled). Such thermostats are now skipped with a warning, and one failed publish no longer stops the bridge.
+  - **Security:** retained command messages were applied again every time the bridge reconnected, so a command could keep taking effect long after it was sent. Retained commands are now ignored.
+  - Text from the broker is escaped in log messages, so it can't inject terminal control codes.
+  - `set/mode` also accepts `0`-`3`, like `ecobee-hub`.
 - Stopping the controller while a thermostat was still connecting (or reconnecting) could leave a task running, so `stop()` took 2 extra seconds and Python printed "Task was destroyed but it is pending!" on exit.
 - `--dump` left a HomeKit connection open (and a socket leaking) when the thermostat didn't answer. The same leak was fixed for normal connections in 1.1.1.
 

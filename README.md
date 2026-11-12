@@ -191,6 +191,15 @@ listens for commands on `ecobee/<label>/set/<thing>`:
     ecobee/<label>/set/humidity   40
     ecobee/<label>/set/comfort    away      (home/sleep/away/hold)
 
+Commands must be sent as normal (not retained) messages; retained ones are
+ignored, because the broker would replay them every time the bridge reconnects.
+
+If your broker needs a login, use `--username` and put the password in the
+`ECOBEE_MQTT_PASSWORD` environment variable rather than `--password`, so it
+doesn't show up in the process list. Plain MQTT isn't encrypted: anyone who can
+publish to your broker can control the thermostat, so keep the broker on your
+own network and require a login if others share it.
+
 ## Project layout
 
 ```
