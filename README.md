@@ -52,7 +52,7 @@ The wizard will:
 
 Run it again for each additional thermostat. Files are saved to a per-user folder (`%LOCALAPPDATA%\ecobee-local` on Windows, `~/ecobee-local` on macOS/Linux) by default; use `--folder PATH` to change it.
 
-> **Keep your pairing files private.** Each one contains long-term keys that grant full control of that thermostat on your network. Don't commit or share them. The included `.gitignore` already excludes them.
+> **Keep your pairing files private.** Each one contains long-term keys that grant full control of that thermostat on your network. Don't commit or share them. `ecobee-pair` saves them readable only by you. The included `.gitignore` excludes the default names (`pair.json`, `pair1.json`, ...); if you save one under another name inside a git repo, add it to `.gitignore` yourself.
 
 ### 3. Run
 

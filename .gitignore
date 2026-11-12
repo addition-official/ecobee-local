@@ -3,7 +3,10 @@
 # Pairing files contain long-term HomeKit keys for your thermostats. Anyone
 # with them can control your devices on your network. They live in a per-user
 # folder by default, but if you ever point --folder at the repo or copy a
-# pair file in, these rules keep them out of git.
+# pair file in, these rules keep them out of git. They match by NAME only
+# (git can't look inside files): a pairing saved under another name, e.g.
+# upstairs.json, is NOT covered. Use pair*.json names or one of the folders
+# below inside a repo.
 # ---------------------------------------------------------------------------
 pair.json
 pair*.json
@@ -11,10 +14,6 @@ pair*.json
 ecobee-local/
 pairings/
 creds/
-
-# Any stray JSON that looks like a saved pairing (belt and suspenders).
-# If you have legitimate committed JSON, remove/adjust this line.
-**/AccessoryPairingID*
 
 # ---------------------------------------------------------------------------
 # Python
