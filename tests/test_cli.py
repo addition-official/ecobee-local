@@ -177,3 +177,29 @@ def test_help_starts(module, text):
                          capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     assert text in out.stdout
+
+
+# ------------------------------------------------------ bad --label usage
+
+@pytest.mark.parametrize("extra", [
+    ["--set-temp", "70"],
+    ["--dump"],
+    ["--headless"],
+])
+def test_unknown_label_is_a_clear_error(hub, device, capsys, extra):
+    assert hub("--label", "mian", *extra) == 2
+    err = capsys.readouterr().err
+    assert "no thermostat labelled 'mian'" in err
+    assert "main" in err                   # lists the ones that exist
+    assert device.writes == []
+
+
+@pytest.mark.parametrize("flag, value", [
+    ("--set-temp", "70"), ("--set-mode", "1"), ("--set-fan", "auto"),
+    ("--set-comfort", "home"), ("--set-heat", "68"), ("--set-cool", "76"),
+    ("--set-humidity", "40"),
+])
+def test_action_without_label_is_an_error(hub, device, capsys, flag, value):
+    assert hub(flag, value) == 2
+    assert f"{flag} needs --label" in capsys.readouterr().err
+    assert device.writes == []

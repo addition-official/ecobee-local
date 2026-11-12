@@ -1849,11 +1849,26 @@ def main():
     )
     args = parser.parse_args()
 
+    # one-shot actions change a specific thermostat, so they need --label
+    actions = {
+        "--set-temp": args.set_temp, "--set-mode": args.set_mode,
+        "--set-heat": args.set_heat, "--set-cool": args.set_cool,
+        "--set-fan": args.set_fan, "--set-humidity": args.set_humidity,
+        "--set-comfort": args.set_comfort,
+    }
+    if not args.label:
+        for flag, value in actions.items():
+            if value is not None:
+                parser.error(f"{flag} needs --label (which thermostat?)")
+
     ec = EcobeeController.from_folder(app_folder=args.folder, debug=args.debug)
     if not ec.labels:
         print(f"No pairing files found in {ec.app_folder}. Run ecobee-pair "
               f"first, or point --folder at the folder that has them.")
         sys.exit(0)
+    if args.label and args.label not in ec.labels:
+        parser.error(f"no thermostat labelled '{args.label}' "
+                     f"(found: {', '.join(ec.labels)})")
 
     targets = [args.label] if args.label else list(ec.labels)
 

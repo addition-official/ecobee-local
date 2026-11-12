@@ -10,6 +10,8 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - Releases are published to PyPI from GitHub Actions with trusted publishing. The sdist now includes the tests and this changelog.
 
 ### Fixed
+- `ecobee-hub --label` with a label that doesn't exist crashed with a traceback. It now says so and lists the labels it found.
+- `ecobee-hub --set-temp` (and the other `--set-*` options) without `--label` silently did nothing. It now says `--label` is needed.
 - `--folder` (and `EcobeeController.from_folder()`) treated every `.json` file in the folder as a thermostat, so pointing it at an app folder with other JSON files (config, caches, ...) listed each of them as an offline thermostat. Files that aren't HomeKit pairings are now skipped.
 - If the thermostat couldn't read one value (it reports "busy" now and then), or sent one that can't be used (empty, text, infinity), the whole thermostat went offline and reconnected on every poll. Now it stays online and that value keeps its last reading, or `--` if it has never been read.
 - When the thermostat rejected a change (for example a temperature outside its range), the setters still returned `{"ok": True}` and showed the rejected value until the next poll. They now return `{"ok": False, "error": ...}` with the thermostat's reason and leave the status unchanged.
