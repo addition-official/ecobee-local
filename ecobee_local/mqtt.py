@@ -1,5 +1,5 @@
 """
-ecobee_mqtt.py -- an optional MQTT bridge for ecobee-local.
+ecobee_local.mqtt (the ecobee-mqtt command) -- an optional MQTT bridge for ecobee-local.
 
 It connects to your thermostats (using the ecobee-local library) and mirrors
 them onto an MQTT broker, so other tools (Node-RED, dashboards, custom scripts,
@@ -30,14 +30,14 @@ It does two things continuously:
          ecobee/<label>/set/comfort      payload: away      (home/sleep/away/hold)
 
 Requirements:
-    pip install ecobee-local paho-mqtt
+    pip install "ecobee-local[mqtt]"
     and an MQTT broker reachable on the network (e.g. Mosquitto).
 
 Usage:
-    python ecobee_mqtt.py                       # broker at localhost:1883
-    python ecobee_mqtt.py --host 192.168.1.50   # broker elsewhere
-    python ecobee_mqtt.py --host x --port 1883 --username u --password p
-    python ecobee_mqtt.py --prefix ecobee --interval 5
+    ecobee-mqtt                       # broker at localhost:1883
+    ecobee-mqtt --host 192.168.1.50   # broker elsewhere
+    ecobee-mqtt --host x --port 1883 --username u --password p
+    ecobee-mqtt --prefix ecobee --interval 5
 
 This bridge is intentionally simple and broker-agnostic. It does NOT implement
 Home Assistant MQTT Discovery (kept deliberately minimal); state and command
@@ -52,7 +52,8 @@ import time
 try:
     import paho.mqtt.client as mqtt
 except ImportError:
-    print("paho-mqtt is required: pip install paho-mqtt", file=sys.stderr)
+    print('paho-mqtt is required: pip install "ecobee-local[mqtt]"',
+          file=sys.stderr)
     sys.exit(1)
 
 from ecobee_local import EcobeeController

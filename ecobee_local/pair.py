@@ -1,12 +1,13 @@
 """
-pair_ecobee.py
-==============
+ecobee_local.pair (the ecobee-pair command)
+===========================================
 One-time pairing wizard for controlling an Ecobee thermostat locally over
 Apple HomeKit (HAP), with no cloud, no OAuth, and no ecobee developer key.
 
 It scans your local network for the thermostat, walks you through the HomeKit
 pairing handshake, and writes the resulting credentials to a JSON file in the
-smartdash app folder. ecobee_controller.py then reads those files.
+per-user ecobee-local folder. ecobee-hub and EcobeeController then read
+those files.
 
 Cross-platform: Windows, macOS, Linux.
 
@@ -23,7 +24,8 @@ like passwords. Do NOT commit or share them.
 
 Usage
 -----
-    python pair_ecobee.py
+    ecobee-pair                     # or: python -m ecobee_local.pair
+    ecobee-pair --folder PATH       # save somewhere else
 """
 
 import asyncio
@@ -48,7 +50,7 @@ if sys.platform == "win32":
 # storage location
 # ----------------------------------------------------------------------------
 # Folder name where pairing files are saved. Keep this in sync with
-# ecobee_controller.APP_NAME. Override with the --folder flag if needed.
+# ecobee_local.controller.APP_NAME. Override with the --folder flag if needed.
 APP_NAME = "ecobee-local"
 
 
@@ -362,7 +364,7 @@ async def wizard(app_folder=None):
     print(f"Saved '{friendly}' (label '{label}') to: {target_file}")
     print("Keep this file private; it contains long-term pairing keys.")
     print()
-    print("ecobee_controller.py will auto-discover it via from_folder().")
+    print("ecobee-hub and EcobeeController.from_folder() will find it there.")
 
 
 def main():

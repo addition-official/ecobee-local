@@ -21,6 +21,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - `--dump` left a HomeKit connection open (and a socket leaking) when the thermostat didn't answer. The same leak was fixed for normal connections in 1.1.1.
 
 ### Changed
+- Messages, help text and comments that still named the old scripts (`pair_ecobee.py`, `ecobee_controller.py`, `ecobee_mqtt.py`) now name the `ecobee-pair`, `ecobee-hub` and `ecobee-mqtt` commands.
 - "No pairing files found" now says which folder was searched and points to `ecobee-pair` and `--folder` (it named the old `pair_ecobee.py`).
 - Requires Python 3.10+. `aiohomekit` 3.0 and later already required it, so installs on 3.9 were failing anyway.
 - Removed the duplicate `ecobee_mqtt.py` from the repository root. It was never part of the package; use `ecobee-mqtt` or `python -m ecobee_local.mqtt`.

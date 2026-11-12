@@ -5,7 +5,7 @@
 # aiohomekit is the HomeKit Accessory Protocol client that does the real work
 # (pairing, reading/writing characteristics over the local network). zeroconf
 # is used for mDNS discovery when pairing; aiohomekit depends on it too, but it
-# is listed explicitly because pair_ecobee.py imports it directly.
+# is listed explicitly because ecobee_local/pair.py imports it directly.
 
 aiohomekit>=3.0
 zeroconf>=0.130

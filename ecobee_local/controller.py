@@ -1,9 +1,9 @@
 """
-ecobee_controller.py
-====================
+ecobee_local.controller
+=======================
 A lightweight, standalone, fully-local controller for Ecobee thermostats over
 Apple HomeKit (HAP). No cloud, no OAuth, no ecobee developer key, no Home
-Assistant. Pair once with pair_ecobee.py, then use this to read and control.
+Assistant. Pair once with ecobee-pair, then use this to read and control.
 
 Design
 ------
@@ -17,8 +17,8 @@ never block on the device; only writes touch the thermostat.
 
 Pairing files
 -------------
-Each thermostat is one JSON file created by pair_ecobee.py. A file may include
-two extra keys that this module reads (and pair_ecobee.py writes):
+Each thermostat is one JSON file created by ecobee-pair. A file may include
+two extra keys that this module reads (and ecobee-pair writes):
 
     "_label":  short id used in code / API calls (e.g. "main")
     "_name":   friendly display name (e.g. "Main Floor")
@@ -114,7 +114,7 @@ _TEMP_KEYS = ("current_temp", "target_temp", "cool_threshold", "heat_threshold")
 _INT_KEYS = ("mode", "running_state", "display_units", "target_fan",
              "current_fan", "target_humidity")
 
-# keys pair_ecobee.py adds that are metadata, not HomeKit credentials
+# keys ecobee-pair adds that are metadata, not HomeKit credentials
 _META_KEYS = ("_label", "_name")
 
 
@@ -147,7 +147,7 @@ APP_NAME = "ecobee-local"
 
 
 def default_app_folder():
-    """Return the per-user credentials folder (matches pair_ecobee.py)."""
+    """Return the per-user credentials folder (matches ecobee_local.pair)."""
     if sys.platform == "win32":
         base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
     else:
@@ -294,7 +294,8 @@ class EcobeeController:
         """
         Build a controller from every pairing file in a folder.
 
-        app_folder: folder to scan (defaults to smartdash).
+        app_folder: folder to scan (defaults to the per-user
+                    ecobee-local folder, see default_app_folder()).
         pattern:    glob to match, e.g. "*.json" (default) or "pair*.json".
                     Files whose stem starts with "." are skipped, and so are
                     JSON files that aren't HomeKit pairings (so pairing files
