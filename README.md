@@ -70,10 +70,14 @@ Everything the GUI does is also scriptable. All `--set-*` actions require `--lab
 
 ```
 ecobee-hub                                            # open the GUI
+ecobee-hub --status                                   # print every thermostat's status and exit
+ecobee-hub --status --label main                      # just one
+ecobee-hub --watch                                    # print a line whenever something changes
 ecobee-hub --dump                                     # list every characteristic each thermostat exposes
 ecobee-hub --dump --raw                               # same, without truncating long values
 ecobee-hub --label main --set-temp 72
-ecobee-hub --label main --set-mode 2                  # 0=off 1=heat 2=cool 3=auto
+ecobee-hub --label main --set-temp-c 22.5             # Celsius (also --set-heat-c, --set-cool-c)
+ecobee-hub --label main --set-mode cool               # off/heat/cool/auto (or 0-3)
 ecobee-hub --label main --set-heat 68 --set-cool 75   # auto-mode range
 ecobee-hub --label main --set-fan on
 ecobee-hub --label main --set-comfort away            # home/sleep/away/hold (supported models)
@@ -84,6 +88,8 @@ ecobee-hub --folder PATH                              # use a different credenti
 
 (If you cloned rather than installed, replace `ecobee-hub` with `python -m ecobee_local.controller`.)
 
+`--folder` can point at a folder that has other JSON files too (for example your own app's folder): only files that hold HomeKit pairings are used.
+
 `--dump` is the tool for discovering what your specific model exposes: it prints every accessory, service, and characteristic with its UUID, current value, permissions, and range.
 
 ## Use it as a library
@@ -93,6 +99,7 @@ from ecobee_local import EcobeeController
 
 ec = EcobeeController.from_folder()   # auto-discovers every pairing file
 ec.start()
+ec.wait_ready()                       # wait for the first readings (optional)
 
 print(ec.get_status("main"))
 # {'current_temp': 78, 'target_temp': 75, 'mode': 2, 'humidity': 57,
@@ -113,6 +120,24 @@ ec.set_comfort_mode("main", "away")           # switch locally, no cloud
 
 ec.stop()                                     # cleanly close connections
 ```
+
+Or let a `with` block start it, wait for the first readings, and always close the connections at the end, even if your code raises an error:
+
+```python
+with EcobeeController.from_folder() as ec:
+    ec.set_temp("main", 72)
+```
+
+To react to changes as they happen (from the thermostat, the ecobee app, a schedule, a sensor, or your own commands) instead of polling:
+
+```python
+def changed(label, status):
+    print(label, status["current_temp"], status["target_temp"])
+
+remove = ec.on_change(changed)   # call remove() to stop
+```
+
+Callbacks run on the controller's background thread: keep them quick, and don't call the controller's commands (`set_temp` etc.) from inside one. Those return an error there; hand the work to another thread instead.
 
 `get_status()` returns a dict per thermostat. A few fields are computed for convenience:
 
