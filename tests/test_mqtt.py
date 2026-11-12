@@ -298,3 +298,36 @@ def test_unknown_label_is_logged_and_ignored(connected, device, capsys,
     # known labels still work afterwards
     send(connected, "ecobee/main/set/target", "70")
     assert device.writes == [(1, 11, 21.0)]
+
+
+# ---------------------------------- nothing may escape the MQTT callback
+
+@pytest.mark.parametrize("thing, payload", [
+    ("target", "inf"), ("heat", "-inf"), ("humidity", "1e999"),
+    ("target", "nan"),
+])
+def test_unconvertible_numbers_are_bad_payloads(thing, payload, capsys):
+    ec = FakeEC()
+    send(ec, f"ecobee/main/set/{thing}", payload)
+    assert ec.calls == []
+    assert f"bad payload '{payload}'" in capsys.readouterr().err
+
+
+def test_unexpected_error_is_logged_not_raised(capsys):
+    # paho re-raises callback exceptions, which stops its network thread:
+    # the bridge would keep publishing but never handle another command
+    class Exploding(FakeEC):
+        def set_mode(self, *args):
+            raise RuntimeError("event loop is closed")
+    ec = Exploding()
+    send(ec, "ecobee/main/set/mode", "heat")
+    assert "RuntimeError: event loop is closed" in capsys.readouterr().err
+    send(ec, "ecobee/main/set/target", "70")
+    assert ec.calls == [("set_temp", "main", 70)]
+
+
+def test_non_dict_result_is_reported(capsys):
+    ec = FakeEC(result=None)
+    ec.result = None
+    send(ec, "ecobee/main/set/target", "70")
+    assert "unexpected result None" in capsys.readouterr().err
