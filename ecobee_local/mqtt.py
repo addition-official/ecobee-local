@@ -125,6 +125,11 @@ def make_command_handler(ec, prefix):
         if len(parts) != 4 or parts[0] != prefix or parts[2] != "set":
             return
         label, thing = parts[1], parts[3]
+        if label not in ec.labels:
+            print(f"[cmd] unknown thermostat '{label}' in {topic}; ignored "
+                  f"(known: {', '.join(ec.labels) or 'none'})",
+                  file=sys.stderr)
+            return
 
         try:
             if thing == "target":

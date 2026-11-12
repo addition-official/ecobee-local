@@ -280,3 +280,21 @@ def test_on_connect_reason_code_objects(bridge):
 def test_make_client_builds_a_real_paho_client():
     client = m._make_client()
     assert hasattr(client, "publish") and hasattr(client, "subscribe")
+
+
+# ------------------------------------------------- unknown thermostat labels
+
+@pytest.mark.parametrize("thing, payload", [
+    ("target", "70"), ("mode", "heat"), ("comfort", "away"),
+])
+def test_unknown_label_is_logged_and_ignored(connected, device, capsys,
+                                             thing, payload):
+    # a real controller: commands for a label it doesn't know used to raise
+    # KeyError out of the MQTT callback, which can stop paho's network loop
+    send(connected, f"ecobee/upstairs/set/{thing}", payload)
+    assert device.writes == []
+    err = capsys.readouterr().err
+    assert "unknown thermostat 'upstairs'" in err
+    # known labels still work afterwards
+    send(connected, "ecobee/main/set/target", "70")
+    assert device.writes == [(1, 11, 21.0)]

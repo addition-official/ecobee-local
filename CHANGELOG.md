@@ -11,6 +11,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 ### Fixed
 - If the thermostat couldn't read one value (it reports "busy" now and then), the whole thermostat went offline and reconnected on every poll. Now it stays online and that value keeps its last reading, or `--` if it has never been read.
 - When the thermostat rejected a change (for example a temperature outside its range), the setters still returned `{"ok": True}` and showed the rejected value until the next poll. They now return `{"ok": False, "error": ...}` with the thermostat's reason and leave the status unchanged.
+- `ecobee-mqtt`: a command for a thermostat label that doesn't exist (e.g. `ecobee/typo/set/target`) raised an error inside the MQTT client, which could stop the bridge from receiving further commands. It's now logged and ignored.
 - `--dump` left a HomeKit connection open (and a socket leaking) when the thermostat didn't answer. The same leak was fixed for normal connections in 1.1.1.
 
 ### Changed
