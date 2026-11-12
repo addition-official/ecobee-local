@@ -183,6 +183,24 @@ def _has_value(readings, cid):
 _BAD_VALUE = (TypeError, ValueError, OverflowError)
 
 
+def _number(value, what):
+    """
+    (float, None) for a usable number (numeric strings like "72" included),
+    or (None, error-dict) for anything else: text, None, bools, NaN, inf.
+    """
+    import math
+    bad = {"ok": False, "error": f"invalid {what} {value!r}"}
+    if isinstance(value, bool):
+        return None, bad
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None, bad
+    if not math.isfinite(number):
+        return None, bad
+    return number, None
+
+
 def _write_error(result):
     """
     Return an error message if the thermostat rejected a write, else None.
@@ -608,41 +626,86 @@ class EcobeeController:
         if label in self._names:
             self._names[label] = name
 
+    def _unknown(self, label):
+        """Error dict if label isn't one of this controller's thermostats."""
+        if label in self._state:
+            return None
+        return {"ok": False, "error": f"unknown thermostat {label!r}"}
+
+    def _set_temperature(self, label, key, value, celsius, timeout):
+        err = self._unknown(label)
+        if err:
+            return err
+        number, err = _number(value, "temperature")
+        if err:
+            return err
+        if celsius:
+            coro = self._set_temp_char(label, key, temp_c=number)
+        else:
+            coro = self._set_temp_char(label, key, number)
+        return self._run(coro, timeout=timeout)
+
     def set_temp(self, label, temp_f, timeout=12.0):
         """Set target temperature (Fahrenheit). Returns {'ok': bool, ...}."""
-        return self._run(self._set_temp(label, temp_f), timeout=timeout)
+        return self._set_temperature(label, "target_temp", temp_f, False,
+                                     timeout)
 
     def set_mode(self, label, mode_int, timeout=12.0):
-        """Set mode (use MODE_* constants). Returns {'ok': bool, ...}."""
-        return self._run(self._set_mode(label, mode_int), timeout=timeout)
+        """
+        Set mode: a MODE_* constant (0-3) or a name ("off", "heat", "cool",
+        "auto"). Returns {'ok': bool, ...}.
+        """
+        err = self._unknown(label)
+        if err:
+            return err
+        names = {"off": 0, "heat": 1, "cool": 2, "auto": 3}
+        mode = None
+        if isinstance(mode_int, str) and mode_int.strip().lower() in names:
+            mode = names[mode_int.strip().lower()]
+        else:
+            number, _ = _number(mode_int, "mode")
+            if number is not None and number.is_integer() \
+                    and 0 <= number <= 3:
+                mode = int(number)
+        if mode is None:
+            return {"ok": False,
+                    "error": f"invalid mode {mode_int!r}: use 0-3 or "
+                             f"off/heat/cool/auto"}
+        return self._run(self._set_mode(label, mode), timeout=timeout)
 
     def set_heat_threshold(self, label, temp_f, timeout=12.0):
         """
         Set the heating threshold temperature (Fahrenheit). In auto mode the
         thermostat heats when the room falls below this. Returns {'ok': ...}.
         """
-        return self._run(
-            self._set_temp_char(label, "heat_threshold", temp_f), timeout=timeout)
+        return self._set_temperature(label, "heat_threshold", temp_f, False,
+                                     timeout)
 
     def set_cool_threshold(self, label, temp_f, timeout=12.0):
         """
         Set the cooling threshold temperature (Fahrenheit). In auto mode the
         thermostat cools when the room rises above this. Returns {'ok': ...}.
         """
-        return self._run(
-            self._set_temp_char(label, "cool_threshold", temp_f), timeout=timeout)
+        return self._set_temperature(label, "cool_threshold", temp_f, False,
+                                     timeout)
 
     def set_fan(self, label, auto, timeout=12.0):
         """
         Set fan mode. auto=True -> fan runs on the thermostat's schedule/auto;
         auto=False -> fan runs continuously (manual/on). Returns {'ok': ...}.
         """
+        err = self._unknown(label)
+        if err:
+            return err
         val = 1 if auto else 0
         return self._run(
             self._set_int_char(label, "target_fan", val), timeout=timeout)
 
     def set_display_units(self, label, fahrenheit, timeout=12.0):
         """Set the on-device display units. fahrenheit=True -> F, False -> C."""
+        err = self._unknown(label)
+        if err:
+            return err
         val = 1 if fahrenheit else 0
         return self._run(
             self._set_int_char(label, "display_units", val), timeout=timeout)
@@ -685,6 +748,9 @@ class EcobeeController:
         does not work correctly on every model (see comfort_warning).
         """
         self._warn_comfort_once()
+        err = self._unknown(label)
+        if err:
+            return err
         key = str(mode).lower()
         if key not in _COMFORT_VALUES:
             return {"ok": False,
@@ -696,21 +762,18 @@ class EcobeeController:
     # --- Celsius-direct setters (avoid the Fahrenheit round-trip) ---
     def set_temp_c(self, label, temp_c, timeout=12.0):
         """Set target temperature directly in Celsius (0.5-step)."""
-        return self._run(
-            self._set_temp_char(label, "target_temp", temp_c=temp_c),
-            timeout=timeout)
+        return self._set_temperature(label, "target_temp", temp_c, True,
+                                     timeout)
 
     def set_heat_threshold_c(self, label, temp_c, timeout=12.0):
         """Set heating threshold directly in Celsius (0.5-step)."""
-        return self._run(
-            self._set_temp_char(label, "heat_threshold", temp_c=temp_c),
-            timeout=timeout)
+        return self._set_temperature(label, "heat_threshold", temp_c, True,
+                                     timeout)
 
     def set_cool_threshold_c(self, label, temp_c, timeout=12.0):
         """Set cooling threshold directly in Celsius (0.5-step)."""
-        return self._run(
-            self._set_temp_char(label, "cool_threshold", temp_c=temp_c),
-            timeout=timeout)
+        return self._set_temperature(label, "cool_threshold", temp_c, True,
+                                     timeout)
 
     def set_target_humidity(self, label, percent, timeout=12.0):
         """
@@ -718,12 +781,22 @@ class EcobeeController:
         humidifier/dehumidifier (e.g. Smart Premium). Returns an error dict
         on models that don't expose it.
         """
+        err = self._unknown(label)
+        if err:
+            return err
+        number, err = _number(percent, "humidity")
+        if err or not 0 <= number <= 100:
+            return {"ok": False,
+                    "error": f"invalid humidity {percent!r}: use 0-100"}
         return self._run(
-            self._set_int_char(label, "target_humidity", int(percent)),
+            self._set_int_char(label, "target_humidity", int(round(number))),
             timeout=timeout)
 
     def refresh(self, label, timeout=12.0):
         """Force an immediate read from the device into the cache."""
+        err = self._unknown(label)
+        if err:
+            return err
         return self._run(self._refresh(label), timeout=timeout)
 
     def dump_characteristics(self, label, timeout=20.0):
@@ -736,6 +809,9 @@ class EcobeeController:
         extra characteristics (thresholds, humidity, air quality, ecobee
         vendor-specific ones) into the controller. Returns a list of dicts.
         """
+        err = self._unknown(label)
+        if err:
+            return err
         return self._run(self._dump(label), timeout=timeout)
 
     # ------------------------------------------------------------- internals
@@ -1288,12 +1364,15 @@ class EcobeeController:
                 await asyncio.wait_for(
                     temp_pairing.list_accessories_and_characteristics(), timeout=15.0
                 )
-            except Exception:
+            except BaseException as e:
                 try:
                     await temp_pairing.close()
                 except Exception:
                     pass
-                raise
+                if not isinstance(e, Exception):
+                    raise   # cancelled: let it through
+                return {"ok": False,
+                        "error": f"could not connect: {type(e).__name__}: {e}"}
             pairing = temp_pairing
 
         rows = []

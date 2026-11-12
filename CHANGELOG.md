@@ -15,6 +15,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - `with EcobeeController.from_folder() as ec:` connects (waiting for the first readings) and always closes the connections at the end of the block, even if your code raises an error.
 - `ec.on_change(callback)`: `callback(label, status)` is called whenever a thermostat's status changes, from anywhere (the thermostat, the ecobee app, a schedule, a sensor, going offline, or your own commands). Returns a function that removes the callback.
 - `ecobee-hub --watch` prints a line whenever something changes, e.g. `14:02:11 main (Main Floor): target_temp 69 -> 70` (add `--label` for just one thermostat).
+- `set_mode()` also accepts a name: `"off"`, `"heat"`, `"cool"` or `"auto"`.
 - Releases are published to PyPI from GitHub Actions with trusted publishing. The sdist now includes the tests and this changelog.
 
 ### Fixed
@@ -32,6 +33,8 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - A refresh triggered by a push update from the thermostat could reconnect after `stop()`. Bursts of push updates are now merged into one read instead of one read each.
 - If a `with` block was interrupted (e.g. Ctrl+C) while connecting, the controller was left running.
 - `stop(timeout=...)` with a short timeout could cut the shutdown off halfway, leaving connections open. The shutdown now always finishes; `stop()` just stops waiting for it after `timeout`.
+- Library calls raised exceptions on bad input instead of returning `{"ok": False, "error": ...}`: an unknown thermostat label (`KeyError`), or a value like `nan`, `inf`, `"abc"` or `None`. Some bad values were even sent: `set_temp(..., True)` wrote -17 °C and `set_mode(..., 2.7)` wrote 2. These now all return an error and send nothing. Numeric strings like `"72"` still work.
+- `dump_characteristics()` raised when the thermostat couldn't be reached; it now returns `{"ok": False, "error": ...}`.
 - Stopping the controller while a thermostat was still connecting (or reconnecting) could leave a task running, so `stop()` took 2 extra seconds and Python printed "Task was destroyed but it is pending!" on exit.
 - `--dump` left a HomeKit connection open (and a socket leaking) when the thermostat didn't answer. The same leak was fixed for normal connections in 1.1.1.
 

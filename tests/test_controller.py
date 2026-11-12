@@ -301,17 +301,6 @@ def test_dump_uses_temporary_connection(device, pair_folder, make_controller):
     assert comfort_w["writable"] and not comfort_w["readable"]
 
 
-def test_dump_failure_closes_temporary_connection(device, pair_folder,
-                                                  make_controller):
-    # regression test for the --dump socket leak
-    device.connect_exc = asyncio.TimeoutError()
-    ec = make_controller(pair_folder)
-    ec.start(connect=False)
-    with pytest.raises(asyncio.TimeoutError):
-        ec.dump_characteristics("main")
-    assert device.pairings[0].closed is True
-
-
 def test_dump_reuses_open_connection(connected, device):
     rows = connected.dump_characteristics("main")
     assert rows and len(device.pairings) == 1
@@ -379,7 +368,7 @@ def test_every_read_failing_keeps_connection(connected, device):
     (lambda ec: ec.set_temp_c("main", 40), TARGET_TEMP, "target_temp", 72),
     (lambda ec: ec.set_heat_threshold("main", 40), HEAT_THRESHOLD,
      "heat_threshold", 68),
-    (lambda ec: ec.set_mode("main", 7), MODE, "mode", 1),
+    (lambda ec: ec.set_mode("main", 3), MODE, "mode", 1),
     (lambda ec: ec.set_fan("main", False), TARGET_FAN, "target_fan", 1),
 ])
 def test_rejected_write_reports_failure(connected, device, call, cid, key,
@@ -813,3 +802,86 @@ def test_short_stop_timeout_still_closes_everything(device, pair_folder,
     assert time.monotonic() - t0 < 1
     assert wait_until(lambda: not thread.is_alive())
     assert all(p.closed for p in device.pairings)
+
+
+# ------------------------------------------------------ bad library input
+
+@pytest.mark.parametrize("call", [
+    lambda ec: ec.set_temp("nope", 70),
+    lambda ec: ec.set_temp_c("nope", 21),
+    lambda ec: ec.set_mode("nope", 1),
+    lambda ec: ec.set_fan("nope", True),
+    lambda ec: ec.set_comfort_mode("nope", "home"),
+    lambda ec: ec.set_target_humidity("nope", 40),
+    lambda ec: ec.refresh("nope"),
+    lambda ec: ec.dump_characteristics("nope"),
+])
+def test_unknown_label_returns_error(connected, device, call):
+    res = call(connected)
+    assert res == {"ok": False, "error": "unknown thermostat 'nope'"}
+    assert device.writes == []
+
+
+@pytest.mark.parametrize("value", [
+    float("nan"), float("inf"), -float("inf"), "abc", None, True, False,
+    10 ** 400, [], "",
+])
+@pytest.mark.parametrize("setter", [
+    "set_temp", "set_temp_c", "set_heat_threshold", "set_cool_threshold",
+    "set_heat_threshold_c", "set_cool_threshold_c",
+])
+def test_bad_temperature_returns_error(connected, device, setter, value):
+    res = getattr(connected, setter)("main", value)
+    assert res["ok"] is False and "invalid temperature" in res["error"]
+    assert device.writes == []
+
+
+def test_numeric_strings_still_work(connected, device):
+    assert connected.set_temp("main", "71") == {"ok": True}
+    assert device.writes[-1] == (*TARGET_TEMP, 21.5)
+    assert connected.set_temp_c("main", " 22.5 ") == {"ok": True}
+
+
+@pytest.mark.parametrize("value, written", [
+    (2, 2), ("cool", 2), ("HEAT", 1), (EcobeeController.MODE_AUTO, 3),
+    (0.0, 0), ("3", 3),
+])
+def test_set_mode_values(connected, device, value, written):
+    assert connected.set_mode("main", value) == {"ok": True}
+    assert device.writes[-1] == (*MODE, written)
+
+
+@pytest.mark.parametrize("value", [2.7, 4, -1, "warm", None, True,
+                                   float("nan")])
+def test_set_mode_rejects_bad_values(connected, device, value):
+    res = connected.set_mode("main", value)
+    assert res["ok"] is False and "invalid mode" in res["error"]
+    assert device.writes == []
+
+
+@pytest.mark.parametrize("value", [float("nan"), "lots", None, True, -5,
+                                   101, 1e30])
+def test_bad_humidity_returns_error(device, pair_folder, make_controller,
+                                    value):
+    device.accessories = build_accessories(humidity_target=True)
+    ec = make_controller(pair_folder)
+    ec.start()
+    assert ec.wait_ready(timeout=5)
+    res = ec.set_target_humidity("main", value)
+    assert res["ok"] is False and "invalid humidity" in res["error"]
+    assert device.writes == []
+    assert ec.set_target_humidity("main", 40.4) == {"ok": True}
+    assert device.writes == [(1, 22, 40)]
+
+
+@pytest.mark.parametrize("exc", [OSError("unreachable"),
+                                 asyncio.TimeoutError()])
+def test_dump_failure_returns_error(device, pair_folder, make_controller,
+                                    exc):
+    device.connect_exc = exc
+    ec = make_controller(pair_folder)
+    ec.start(connect=False)
+    res = ec.dump_characteristics("main")
+    assert res["ok"] is False
+    assert type(exc).__name__ in res["error"]
+    assert device.pairings[0].closed
