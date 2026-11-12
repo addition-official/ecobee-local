@@ -36,6 +36,9 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - Library calls raised exceptions on bad input instead of returning `{"ok": False, "error": ...}`: an unknown thermostat label (`KeyError`), or a value like `nan`, `inf`, `"abc"` or `None`. Some bad values were even sent: `set_temp(..., True)` wrote -17 °C and `set_mode(..., 2.7)` wrote 2. These now all return an error and send nothing. Numeric strings like `"72"` still work.
 - `dump_characteristics()` raised when the thermostat couldn't be reached; it now returns `{"ok": False, "error": ...}`.
 - For 12 seconds after `set_comfort_mode()`, every comfort reading from the thermostat was ignored, including a real change made at the wall in that time, and nothing re-checked it afterwards. Now only readings that still show the previous profile are ignored, and the thermostat is read again when the 12 seconds are up.
+- `ecobee-hub` on a machine with no display said "falling back to headless mode" but then exited. It now keeps running like `--headless`.
+- `ecobee-hub --dump` crashed with a traceback when a thermostat couldn't be reached. It now prints the error and goes on to the next thermostat.
+- `ecobee-hub` exited with code 0 even when a `--set-*` failed, or when there were no pairing files for a `--status`, `--dump`, `--watch` or `--set-*` run. Those now exit with 1. `--dump` combined with `--set-*` silently ignored the `--set-*`; it's now an error.
 - Stopping the controller while a thermostat was still connecting (or reconnecting) could leave a task running, so `stop()` took 2 extra seconds and Python printed "Task was destroyed but it is pending!" on exit.
 - `--dump` left a HomeKit connection open (and a socket leaking) when the thermostat didn't answer. The same leak was fixed for normal connections in 1.1.1.
 

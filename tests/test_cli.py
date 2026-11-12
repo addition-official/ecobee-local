@@ -120,11 +120,14 @@ def test_headless_service_stops_cleanly(hub, device, capsys):
     assert device.pairings[0].closed is True
 
 
-def test_gui_unavailable_falls_back(hub, device, capsys):
+def test_gui_unavailable_falls_back_to_service(hub, device, capsys):
     hub()
     out = capsys.readouterr().out
     assert "GUI unavailable (no display available)" in out
     assert "main (Main Floor)" in out
+    # keeps running like --headless instead of exiting
+    assert "headless service running" in out
+    assert "stopping..." in out
 
 
 def test_dump(hub, device, capsys):
@@ -358,3 +361,49 @@ def test_watch_ignores_celsius_only_wobble(hub, device, capsys):
     hub("--watch")
     out = capsys.readouterr().out
     assert "->" not in out
+
+
+# -------------------------------------------------------------- exit codes
+
+def test_failed_action_exits_1(hub, device, capsys):
+    assert hub("--label", "main", "--set-humidity", "40") == 1
+    assert hub("--label", "main", "--set-temp", "70") in (None, 0)
+
+
+def test_offline_action_exits_1(hub, device):
+    device.connect_exc = OSError("unreachable")
+    assert hub("--label", "main", "--set-temp", "70") == 1
+
+
+def test_dump_unreachable_prints_error_and_exits_1(hub, device,
+                                                  pair_folder, capsys):
+    write_pair_file(pair_folder, "pair1.json", label="up", name="Upstairs")
+    device.connect_exc = OSError("unreachable")
+    assert hub("--dump") == 1
+    out = capsys.readouterr().out
+    assert "=== main (Main Floor) ===" in out
+    assert "=== up (Upstairs) ===" in out           # carried on
+    assert "could not connect: OSError: unreachable" in out
+
+
+def test_dump_with_set_is_rejected(hub, device, capsys):
+    assert hub("--dump", "--label", "main", "--set-temp", "70") == 2
+    assert "--dump can't be combined with --set-temp" in \
+        capsys.readouterr().err
+    assert device.writes == []
+
+
+@pytest.mark.parametrize("argv, code", [
+    ([], 0),
+    (["--status"], 1),
+    (["--dump"], 1),
+    (["--label", "main", "--set-temp", "70"], 1),
+])
+def test_no_pairing_files_exit_code(tmp_path, monkeypatch, capsys, argv,
+                                    code):
+    monkeypatch.setattr(sys, "argv",
+                        ["ecobee-hub", "--folder", str(tmp_path), *argv])
+    with pytest.raises(SystemExit) as exc:
+        c.main()
+    assert exc.value.code == code
+    assert "No pairing files found" in capsys.readouterr().out

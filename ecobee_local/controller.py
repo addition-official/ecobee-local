@@ -2260,16 +2260,20 @@ def main():
         "--set-temp-c": args.set_temp_c, "--set-heat-c": args.set_heat_c,
         "--set-cool-c": args.set_cool_c,
     }
-    if not args.label:
-        for flag, value in actions.items():
-            if value is not None:
-                fail(f"{flag} needs --label (which thermostat?)")
+    requested = [flag for flag, value in actions.items() if value is not None]
+    if requested and not args.label:
+        fail(f"{requested[0]} needs --label (which thermostat?)")
+    if requested and args.dump:
+        fail(f"--dump can't be combined with {requested[0]}")
 
     ec = EcobeeController.from_folder(app_folder=args.folder, debug=args.debug)
     if not ec.labels:
         print(f"No pairing files found in {ec.app_folder}. Run ecobee-pair "
               f"first, or point --folder at the folder that has them.")
-        sys.exit(0)
+        # an error if something specific was asked for
+        asked = requested or args.label or args.status or args.dump \
+            or args.watch
+        sys.exit(1 if asked else 0)
     if args.label and args.label not in ec.labels:
         fail(f"no thermostat labelled '{args.label}' "
                      f"(found: {', '.join(ec.labels)})")
@@ -2280,12 +2284,17 @@ def main():
         # start the event loop WITHOUT opening persistent connections, so the
         # dump's own temp connection is the only one to each device
         ec.start(connect=False)
+        failed = False
         for label in targets:
             print()
             print(f"=== {label} ({ec.get_name(label)}) ===")
             rows = ec.dump_characteristics(label)
+            if isinstance(rows, dict) or (
+                    rows and len(rows[0]) == 1 and "error" in rows[0]):
+                failed = True
             _print_dump(rows, truncate=not args.raw)
-        sys.exit(0)
+        ec.stop()
+        sys.exit(1 if failed else 0)
 
     # Did the user request a specific one-shot action?
     any_action = any(v is not None for v in actions.values())
@@ -2301,37 +2310,40 @@ def main():
             sys.exit(0)
         except RuntimeError as e:
             print(f"GUI unavailable ({e}); falling back to headless mode.")
-            # fall through to headless below
+            args.headless = True    # run on as a service, like --headless
 
     ec.start()
     print("waiting for initial connections...")
     ec.wait_ready()
 
+    failures = []
+
+    def report(name, result):
+        print(f"{name}:", result)
+        if not (isinstance(result, dict) and result.get("ok")):
+            failures.append(name)
+
     if args.label:
         if args.set_temp is not None:
-            print("set-temp:", ec.set_temp(args.label, args.set_temp))
+            report("set-temp", ec.set_temp(args.label, args.set_temp))
         if args.set_mode is not None:
-            print("set-mode:", ec.set_mode(args.label, args.set_mode))
+            report("set-mode", ec.set_mode(args.label, args.set_mode))
         if args.set_heat is not None:
-            print("set-heat:", ec.set_heat_threshold(args.label, args.set_heat))
+            report("set-heat", ec.set_heat_threshold(args.label, args.set_heat))
         if args.set_cool is not None:
-            print("set-cool:", ec.set_cool_threshold(args.label, args.set_cool))
+            report("set-cool", ec.set_cool_threshold(args.label, args.set_cool))
         if args.set_temp_c is not None:
-            print("set-temp-c:", ec.set_temp_c(args.label, args.set_temp_c))
+            report("set-temp-c", ec.set_temp_c(args.label, args.set_temp_c))
         if args.set_heat_c is not None:
-            print("set-heat-c:",
-                  ec.set_heat_threshold_c(args.label, args.set_heat_c))
+            report("set-heat-c", ec.set_heat_threshold_c(args.label, args.set_heat_c))
         if args.set_cool_c is not None:
-            print("set-cool-c:",
-                  ec.set_cool_threshold_c(args.label, args.set_cool_c))
+            report("set-cool-c", ec.set_cool_threshold_c(args.label, args.set_cool_c))
         if args.set_fan is not None:
-            print("set-fan:", ec.set_fan(args.label, args.set_fan == "auto"))
+            report("set-fan", ec.set_fan(args.label, args.set_fan == "auto"))
         if args.set_humidity is not None:
-            print("set-humidity:",
-                  ec.set_target_humidity(args.label, args.set_humidity))
+            report("set-humidity", ec.set_target_humidity(args.label, args.set_humidity))
         if args.set_comfort is not None:
-            print("set-comfort:",
-                  ec.set_comfort_mode(args.label, args.set_comfort))
+            report("set-comfort", ec.set_comfort_mode(args.label, args.set_comfort))
 
     for t in ec.list_thermostats():
         if (args.status or args.watch) and args.label \
@@ -2381,6 +2393,8 @@ def main():
             ec.stop()
     else:
         ec.stop()   # one-shot run: close the connections cleanly
+        if failures:
+            sys.exit(1)
 
 
 if __name__ == "__main__":
