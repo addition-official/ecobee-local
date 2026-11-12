@@ -11,6 +11,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - `ecobee-hub` commands no longer wait a fixed 6 seconds before acting; they continue as soon as the thermostats are connected, usually in a second or two.
 - `ecobee-hub --status` prints each thermostat's status and exits (add `--label` for just one). Before, seeing the status meant running `--headless` and pressing Ctrl+C.
 - `ecobee-hub --set-mode` accepts names: `off`, `heat`, `cool`, `auto`. The numbers 0-3 still work.
+- `ecobee-hub --set-temp-c`, `--set-heat-c` and `--set-cool-c` set temperatures in Celsius (0.5° steps), like the library's `set_temp_c()` and friends.
 - Releases are published to PyPI from GitHub Actions with trusted publishing. The sdist now includes the tests and this changelog.
 
 ### Fixed

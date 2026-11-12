@@ -9,7 +9,10 @@ import pytest
 import ecobee_local.controller as c
 from ecobee_local import EcobeeController
 
-from conftest import COMFORT_WRITE, MODE, TARGET_TEMP, write_pair_file
+from conftest import (
+    COMFORT_WRITE, COOL_THRESHOLD, HEAT_THRESHOLD, MODE, TARGET_TEMP,
+    write_pair_file,
+)
 
 REAL_SLEEP = time.sleep
 
@@ -261,4 +264,29 @@ def test_set_mode_by_name_or_number(hub, device, value, mode):
 def test_set_mode_rejects_others(hub, device, capsys, value):
     assert hub("--label", "main", "--set-mode", value) == 2
     assert "off, heat, cool, auto or 0-3" in capsys.readouterr().err
+    assert device.writes == []
+
+
+# ------------------------------------------------------- Celsius options
+
+@pytest.mark.parametrize("flag, value, cid, written", [
+    ("--set-temp-c", "21.5", TARGET_TEMP, 21.5),
+    ("--set-temp-c", "21.3", TARGET_TEMP, 21.5),      # snapped to 0.5
+    ("--set-heat-c", "19", HEAT_THRESHOLD, 19.0),
+    ("--set-cool-c", "24.5", COOL_THRESHOLD, 24.5),
+])
+def test_celsius_options(hub, device, capsys, flag, value, cid, written):
+    hub("--label", "main", flag, value)
+    assert (*cid, written) in device.writes
+    assert f"{flag[2:]}: {{'ok': True}}" in capsys.readouterr().out
+
+
+def test_celsius_option_needs_label(hub, device, capsys):
+    assert hub("--set-temp-c", "21") == 2
+    assert "--set-temp-c needs --label" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["warm", "nan", "inf"])
+def test_celsius_option_rejects_non_numbers(hub, device, capsys, value):
+    assert hub("--label", "main", "--set-temp-c", value) == 2
     assert device.writes == []

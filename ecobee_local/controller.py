@@ -1828,6 +1828,20 @@ def _parse_mode(text):
         f"invalid mode '{text}': use off, heat, cool, auto or 0-3")
 
 
+def _parse_celsius(text):
+    """argparse type for the --set-*-c options: a finite number."""
+    import argparse
+    import math
+    try:
+        value = float(text)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(
+            f"invalid temperature '{text}': use a number like 21.5")
+    return value
+
+
 def main():
     import argparse
     import time
@@ -1859,6 +1873,13 @@ def main():
         "--set-cool", type=int, default=None, metavar="F",
         help="set cooling threshold in F for auto mode (requires --label)",
     )
+    for name, what in (("temp", "target temperature"),
+                       ("heat", "heating threshold"),
+                       ("cool", "cooling threshold")):
+        parser.add_argument(
+            f"--set-{name}-c", type=_parse_celsius, default=None, metavar="C",
+            help=f"set {what} in Celsius, 0.5 steps (requires --label)",
+        )
     parser.add_argument(
         "--set-fan", choices=["auto", "on"], default=None,
         help="set fan to auto or on/continuous (requires --label)",
@@ -1907,6 +1928,8 @@ def main():
         "--set-heat": args.set_heat, "--set-cool": args.set_cool,
         "--set-fan": args.set_fan, "--set-humidity": args.set_humidity,
         "--set-comfort": args.set_comfort,
+        "--set-temp-c": args.set_temp_c, "--set-heat-c": args.set_heat_c,
+        "--set-cool-c": args.set_cool_c,
     }
     if not args.label:
         for flag, value in actions.items():
@@ -1936,9 +1959,7 @@ def main():
         sys.exit(0)
 
     # Did the user request a specific one-shot action?
-    any_action = any(v is not None for v in (
-        args.set_temp, args.set_mode, args.set_heat, args.set_cool,
-        args.set_fan, args.set_humidity, args.set_comfort))
+    any_action = any(v is not None for v in actions.values())
     # run once and exit (vs. the GUI or the --headless service)
     one_shot = any_action or args.status
 
@@ -1966,6 +1987,14 @@ def main():
             print("set-heat:", ec.set_heat_threshold(args.label, args.set_heat))
         if args.set_cool is not None:
             print("set-cool:", ec.set_cool_threshold(args.label, args.set_cool))
+        if args.set_temp_c is not None:
+            print("set-temp-c:", ec.set_temp_c(args.label, args.set_temp_c))
+        if args.set_heat_c is not None:
+            print("set-heat-c:",
+                  ec.set_heat_threshold_c(args.label, args.set_heat_c))
+        if args.set_cool_c is not None:
+            print("set-cool-c:",
+                  ec.set_cool_threshold_c(args.label, args.set_cool_c))
         if args.set_fan is not None:
             print("set-fan:", ec.set_fan(args.label, args.set_fan == "auto"))
         if args.set_humidity is not None:
