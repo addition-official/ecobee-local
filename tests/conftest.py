@@ -190,6 +190,8 @@ class FakeDevice:
         self.read_errors = {}     # {(aid, iid): hap status code}
         self.write_errors = {}    # {(aid, iid): hap status code}
         self.hang = False
+        self.connect_delay = 0    # seconds before connecting succeeds/fails
+        self.write_delay = 0      # seconds before a write is applied
         self.writes = []          # every (aid, iid, value) written
         self.pairings = []        # every FakePairing created for this device
         self.reads = 0
@@ -212,6 +214,7 @@ class FakePairing:
 
     async def list_accessories_and_characteristics(self):
         await self.device._maybe_hang()
+        await asyncio.sleep(self.device.connect_delay)
         if self.device.connect_exc:
             raise self.device.connect_exc
         self.accessories = self.device.accessories
@@ -232,6 +235,7 @@ class FakePairing:
 
     async def put_characteristics(self, chars):
         await self.device._maybe_hang()
+        await asyncio.sleep(self.device.write_delay)
         if self.device.write_exc:
             raise self.device.write_exc
         # like aiohomekit: rejected writes come back as a status dict

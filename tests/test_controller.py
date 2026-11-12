@@ -415,3 +415,28 @@ def test_write_with_success_status_is_ok(connected, device, monkeypatch):
     monkeypatch.setattr(pairing, "put_characteristics", put)
     assert connected.set_temp("main", 70) == {"ok": True}
     assert connected.cache["main"]["target_temp"] == 70
+
+
+# --------------------------------------------------- startup connection race
+
+def test_command_right_after_start_does_not_open_second_connection(
+        device, pair_folder, make_controller):
+    # the thermostat is slow to answer the first connection; a command sent
+    # meanwhile used to open a second connection and leak the first
+    device.connect_delay = 0.3
+    ec = make_controller(pair_folder)
+    ec.start()
+    assert ec.set_temp("main", 70) == {"ok": True}
+    assert len(device.pairings) == 1
+    assert not device.pairings[0].closed
+    assert ec._state["main"]["pairing"] is device.pairings[0]
+
+
+def test_refresh_right_after_start_does_not_open_second_connection(
+        device, pair_folder, make_controller):
+    device.connect_delay = 0.3
+    ec = make_controller(pair_folder)
+    ec.start()
+    ec.refresh("main")
+    assert ec.cache["main"]["online"] is True
+    assert len(device.pairings) == 1

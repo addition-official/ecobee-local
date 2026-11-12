@@ -563,8 +563,10 @@ class EcobeeController:
     def _thread_main(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop_ready.set()
+        # queue _main before signalling ready, so it runs (and creates the
+        # per-thermostat locks) before any call the caller makes after start()
         self._main_task = self._loop.create_task(self._main())
+        self._loop_ready.set()
         self._loop.run_forever()
 
     async def _main(self):
@@ -574,7 +576,11 @@ class EcobeeController:
         if not getattr(self, "_auto_connect", True):
             return  # loop-only mode; caller will drive dump/etc. explicitly
         for label in self.labels:
-            await self._connect(label)
+            # go through _refresh (not _connect directly) so the initial
+            # connect holds the per-thermostat lock; otherwise a refresh or
+            # setter called right after start() could open a second
+            # connection at the same time and the first would never be closed
+            await self._refresh(label)
         await self._health_loop()
 
     def _find_ids(self, pairing):
