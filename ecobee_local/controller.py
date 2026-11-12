@@ -164,6 +164,16 @@ def _f_to_c_half(f):
     return round(c * 2) / 2
 
 
+def _has_value(readings, cid):
+    """
+    True if this characteristic was read successfully. aiohomekit reports a
+    characteristic it couldn't read (busy, timed out, ...) as
+    {"status": <code>, "description": ...} with no "value"; such a failure
+    must not take the whole thermostat offline, it just means "no new value".
+    """
+    return bool(cid) and "value" in (readings.get(cid) or {})
+
+
 def _read_meta(path):
     """Return (label, name) from a pairing file, with sensible fallbacks."""
     stem = os.path.splitext(os.path.basename(path))[0]
@@ -699,10 +709,12 @@ class EcobeeController:
         return out
 
     def _apply_reading(self, label, main_ids, sensor_specs, readings):
+        # A characteristic that failed to read keeps its last good value (or
+        # "--" if it has never been read); the thermostat stays online.
         cache = self.cache[label]
         for key in _UUID:
             cid = main_ids.get(key)
-            if not cid or cid not in readings:
+            if not _has_value(readings, cid):
                 continue
             raw = readings[cid]["value"]
             if key in _TEMP_KEYS:
@@ -724,7 +736,7 @@ class EcobeeController:
         hold_until = self._comfort_hold.get(label, 0)
         if time.monotonic() < hold_until:
             pass  # keep the optimistic value; skip this read-back
-        elif cid and cid in readings:
+        elif _has_value(readings, cid):
             raw = readings[cid]["value"]
             try:
                 cache["comfort_mode"] = _COMFORT_NAMES.get(int(raw), "hold")
@@ -732,6 +744,8 @@ class EcobeeController:
             except (TypeError, ValueError):
                 cache["comfort_mode"] = "--"
                 cache["comfort_raw"] = None
+        elif cid and cid in readings:
+            pass  # read failed this time; keep the last good value
         else:
             cache["comfort_mode"] = "--"   # not supported on this model
             cache["comfort_raw"] = None
@@ -747,7 +761,7 @@ class EcobeeController:
                 s["name"] = "Built-in" if s["builtin"] else f"Sensor {i+1}"
             # temperature -> F, plus raw Celsius
             tid = spec.get("temperature")
-            if tid and tid in readings:
+            if _has_value(readings, tid):
                 s["temperature"] = _c_to_f(readings[tid]["value"])
                 s["temperature_c"] = readings[tid]["value"]
             else:
@@ -756,16 +770,18 @@ class EcobeeController:
             # occupancy / motion -> bool
             for k in ("occupancy", "motion"):
                 cid = spec.get(k)
-                if cid and cid in readings:
+                if _has_value(readings, cid):
                     v = readings[cid]["value"]
                     s[k] = bool(v) if not isinstance(v, str) else (v.lower() == "y")
                 else:
                     s[k] = None
             # battery + low battery
             bid = spec.get("battery")
-            s["battery"] = int(readings[bid]["value"]) if bid and bid in readings else None
+            s["battery"] = (int(readings[bid]["value"])
+                            if _has_value(readings, bid) else None)
             lid = spec.get("low_battery")
-            s["low_battery"] = bool(readings[lid]["value"]) if lid and lid in readings else None
+            s["low_battery"] = (bool(readings[lid]["value"])
+                                if _has_value(readings, lid) else None)
             sensors.append(s)
         cache["sensors"] = sensors
         cache["online"] = True

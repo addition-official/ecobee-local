@@ -9,6 +9,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - Test suite (`pytest`) that runs without a thermostat, broker or network.
 
 ### Fixed
+- If the thermostat couldn't read one value (it reports "busy" now and then), the whole thermostat went offline and reconnected on every poll. Now it stays online and that value keeps its last reading, or `--` if it has never been read.
 - `--dump` left a HomeKit connection open (and a socket leaking) when the thermostat didn't answer. The same leak was fixed for normal connections in 1.1.1.
 
 ### Changed

@@ -11,8 +11,8 @@ import ecobee_local.controller as c
 from ecobee_local import EcobeeController
 
 from conftest import (
-    COMFORT_WRITE, COOL_THRESHOLD, CREDS, DISPLAY_UNITS, HEAT_THRESHOLD, MODE,
-    TARGET_FAN, TARGET_TEMP, build_accessories, run_async, wait_until, write_pair_file,
+    COMFORT_READ, COMFORT_WRITE, COOL_THRESHOLD, CREDS, CURRENT_TEMP,
+    DISPLAY_UNITS, HEAT_THRESHOLD, HUMIDITY, MODE, SENSOR_TEMP, TARGET_FAN, TARGET_TEMP, build_accessories, run_async, wait_until, write_pair_file,
 )
 
 
@@ -324,3 +324,46 @@ def test_dump_missing_file(device, tmp_path, make_controller):
     finally:
         ec.stop()
     assert "pairing file missing" in rows[0]["error"]
+
+
+# ------------------------------------------- characteristics that fail to read
+
+def test_failed_read_keeps_thermostat_online(connected, device):
+    # aiohomekit reports a failed characteristic as {"status": ...} with no
+    # "value". The rest of the reading is still good.
+    first = device.pairings[0]
+    device.read_errors = {TARGET_TEMP: -70402, COMFORT_READ: -70402,
+                          SENSOR_TEMP: -70402}
+    device.values[CURRENT_TEMP] = 23.0
+    device.values[MODE] = 2
+    connected.refresh("main")
+    st = connected.get_status("main")
+    assert st["online"] is True
+    assert st["current_temp"] == 73 and st["mode"] == 2     # updated
+    assert st["target_temp"] == 72                          # last good value
+    assert st["target_temp_c"] == 22.0
+    assert st["comfort_mode"] == "home"                     # last good value
+    assert st["sensors"][1]["temperature"] is None          # unknown
+    assert st["sensors"][1]["battery"] == 87
+    # the connection was kept, not dropped and rebuilt
+    assert len(device.pairings) == 1 and not first.closed
+
+
+def test_failed_read_on_first_connect_is_unknown(device, pair_folder,
+                                                 make_controller):
+    device.read_errors = {TARGET_TEMP: -70402, HUMIDITY: -70402}
+    ec = make_controller(pair_folder)
+    assert run_async(ec, lambda: ec._connect("main")) is True
+    st = ec.get_status("main")
+    assert st["online"] is True
+    assert st["target_temp"] == "--" and st["target_temp_c"] is None
+    assert st["humidity"] == "--"
+    assert st["current_temp"] == 71
+
+
+def test_every_read_failing_keeps_connection(connected, device):
+    device.read_errors = {cid: -70403 for cid in device.values}
+    connected.refresh("main")
+    st = connected.get_status("main")
+    assert st["online"] is True and st["target_temp"] == 72
+    assert len(device.pairings) == 1
