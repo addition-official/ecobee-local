@@ -37,7 +37,10 @@ def hub(monkeypatch, device, pair_folder):
         return all(ec._state[label]["pairing"] for ec in made
                    for label in ec.labels)
 
+    sleeps = []
+
     def fake_sleep(seconds):
+        sleeps.append(seconds)
         if seconds >= 3600:
             raise KeyboardInterrupt
         end = time.monotonic() + 5
@@ -58,6 +61,7 @@ def hub(monkeypatch, device, pair_folder):
             return e.code
         return None
 
+    run.sleeps = sleeps
     yield run
     for ec in made:
         ec.stop()
@@ -206,3 +210,11 @@ def test_action_without_label_is_an_error(hub, device, capsys, flag, value):
     assert f"{flag} needs --label" in err
     assert "usage:" not in err
     assert device.writes == []
+
+
+def test_commands_do_not_sleep_a_fixed_time(hub, device):
+    # used to always wait 6 seconds for connections; now it waits only
+    # until they are made
+    hub("--label", "main", "--set-temp", "70")
+    assert hub.sleeps == []
+    assert (*TARGET_TEMP, 21.0) in device.writes

@@ -491,3 +491,44 @@ def test_unusable_values_keep_last_reading(connected, device):
     bedroom = st["sensors"][1]
     assert bedroom["temperature"] is None and bedroom["temperature_c"] is None
     assert bedroom["battery"] is None and bedroom["low_battery"] is None
+
+
+# ------------------------------------------------------------- wait_ready
+
+def test_wait_ready_returns_once_connected(device, pair_folder,
+                                          make_controller):
+    device.connect_delay = 0.2
+    ec = make_controller(pair_folder)
+    ec.start()
+    t0 = time.monotonic()
+    assert ec.wait_ready(timeout=5) is True
+    assert 0.15 < time.monotonic() - t0 < 2
+    assert ec.get_status("main")["online"] is True
+
+
+def test_wait_ready_false_when_offline(device, pair_folder, make_controller):
+    device.connect_exc = OSError("unreachable")
+    ec = make_controller(pair_folder)
+    ec.start()
+    t0 = time.monotonic()
+    assert ec.wait_ready(timeout=5) is False
+    assert time.monotonic() - t0 < 2       # didn't sit out the timeout
+
+
+def test_wait_ready_gives_up_after_timeout(device, pair_folder,
+                                           make_controller):
+    device.hang = True
+    ec = make_controller(pair_folder)
+    ec.start()
+    t0 = time.monotonic()
+    assert ec.wait_ready(timeout=0.2) is False
+    assert time.monotonic() - t0 < 1
+
+
+def test_wait_ready_before_start_and_without_connect(device, pair_folder,
+                                                    make_controller):
+    ec = make_controller(pair_folder)
+    assert ec.wait_ready(timeout=0.1) is False
+    ec.start(connect=False)
+    assert ec.wait_ready(timeout=2) is False   # nothing was connected
+    assert device.pairings == []

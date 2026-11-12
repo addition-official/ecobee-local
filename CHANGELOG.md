@@ -7,6 +7,8 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 ### Added
 - Optional MQTT bridge: `pip install "ecobee-local[mqtt]"`, then run `ecobee-mqtt`. Publishes each thermostat's state to `ecobee/<label>/...` and accepts commands on `ecobee/<label>/set/<thing>`.
 - Test suite (`pytest`) that runs without a thermostat, broker or network, run by GitHub Actions on Python 3.10 and 3.15.
+- `wait_ready()`: after `start()`, waits until every thermostat has connected (or failed to), so the first `get_status()` has real readings.
+- `ecobee-hub` commands no longer wait a fixed 6 seconds before acting; they continue as soon as the thermostats are connected, usually in a second or two.
 - Releases are published to PyPI from GitHub Actions with trusted publishing. The sdist now includes the tests and this changelog.
 
 ### Fixed

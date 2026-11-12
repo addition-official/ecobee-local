@@ -285,6 +285,8 @@ class EcobeeController:
 
         self._loop = None
         self._loop_ready = threading.Event()
+        # set once every thermostat has had its first connection attempt
+        self._first_connect_done = threading.Event()
         self._started = False
 
     # ---------------------------------------------------------- constructors
@@ -353,8 +355,25 @@ class EcobeeController:
             return
         self._started = True
         self._auto_connect = connect
+        self._first_connect_done.clear()
         threading.Thread(target=self._thread_main, daemon=True).start()
         self._loop_ready.wait(timeout=wait_timeout)
+
+    def wait_ready(self, timeout=30.0):
+        """
+        Block until every thermostat has had its first connection attempt
+        after start(), or until timeout seconds pass. Returns True if all of
+        them are online. Returns quickly when a thermostat is unreachable
+        (False), instead of sitting out the timeout.
+
+        Use it right after start() when you need real readings straight
+        away (get_status() is all "--" until the first connection).
+        """
+        if not self._started:
+            return False
+        self._first_connect_done.wait(timeout)
+        return bool(self.labels) and all(
+            self.cache[label]["online"] for label in self.labels)
 
     def stop(self, timeout=5.0):
         """
@@ -611,14 +630,21 @@ class EcobeeController:
         for label in self.labels:
             self._state[label]["lock"] = asyncio.Lock()
         if not getattr(self, "_auto_connect", True):
+            self._first_connect_done.set()
             return  # loop-only mode; caller will drive dump/etc. explicitly
+        try:
+            await self._connect_all()
+        finally:
+            self._first_connect_done.set()
+        await self._health_loop()
+
+    async def _connect_all(self):
         for label in self.labels:
             # go through _refresh (not _connect directly) so the initial
             # connect holds the per-thermostat lock; otherwise a refresh or
             # setter called right after start() could open a second
             # connection at the same time and the first would never be closed
             await self._refresh(label)
-        await self._health_loop()
 
     def _find_ids(self, pairing):
         """
@@ -1908,7 +1934,7 @@ def main():
 
     ec.start()
     print("waiting for initial connections...")
-    time.sleep(6)
+    ec.wait_ready()
 
     if args.label:
         if args.set_temp is not None:
