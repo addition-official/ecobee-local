@@ -196,6 +196,20 @@ def _write_error(result):
     return None
 
 
+def _is_pairing_file(path):
+    """
+    True if this JSON file holds HomeKit pairing credentials. Lets a folder
+    scan skip an app's other JSON files (config, caches, ...) kept alongside
+    the pairing files. Every pairing aiohomekit makes has AccessoryPairingID.
+    """
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except Exception:
+        return False
+    return isinstance(data, dict) and "AccessoryPairingID" in data
+
+
 def _read_meta(path):
     """Return (label, name) from a pairing file, with sensible fallbacks."""
     stem = os.path.splitext(os.path.basename(path))[0]
@@ -282,7 +296,9 @@ class EcobeeController:
 
         app_folder: folder to scan (defaults to smartdash).
         pattern:    glob to match, e.g. "*.json" (default) or "pair*.json".
-                    Files whose stem starts with "." are skipped.
+                    Files whose stem starts with "." are skipped, and so are
+                    JSON files that aren't HomeKit pairings (so pairing files
+                    can live next to other JSON files).
         Labels come from each file's "_label" key, else the filename stem.
         Duplicate labels are disambiguated by appending the stem.
         """
@@ -290,7 +306,7 @@ class EcobeeController:
         pair_files = {}
         for path in sorted(glob.glob(os.path.join(folder, pattern))):
             base = os.path.basename(path)
-            if base.startswith("."):
+            if base.startswith(".") or not _is_pairing_file(path):
                 continue
             label, _ = _read_meta(path)
             if label in pair_files:
@@ -1835,7 +1851,8 @@ def main():
 
     ec = EcobeeController.from_folder(app_folder=args.folder, debug=args.debug)
     if not ec.labels:
-        print("No pairing files found. Run pair_ecobee.py first.")
+        print(f"No pairing files found in {ec.app_folder}. Run ecobee-pair "
+              f"first, or point --folder at the folder that has them.")
         sys.exit(0)
 
     targets = [args.label] if args.label else list(ec.labels)

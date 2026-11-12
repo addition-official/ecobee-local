@@ -10,6 +10,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - Releases are published to PyPI from GitHub Actions with trusted publishing. The sdist now includes the tests and this changelog.
 
 ### Fixed
+- `--folder` (and `EcobeeController.from_folder()`) treated every `.json` file in the folder as a thermostat, so pointing it at an app folder with other JSON files (config, caches, ...) listed each of them as an offline thermostat. Files that aren't HomeKit pairings are now skipped.
 - If the thermostat couldn't read one value (it reports "busy" now and then), or sent one that can't be used (empty, text, infinity), the whole thermostat went offline and reconnected on every poll. Now it stays online and that value keeps its last reading, or `--` if it has never been read.
 - When the thermostat rejected a change (for example a temperature outside its range), the setters still returned `{"ok": True}` and showed the rejected value until the next poll. They now return `{"ok": False, "error": ...}` with the thermostat's reason and leave the status unchanged.
 - `ecobee-mqtt`: some bad commands raised an error inside the MQTT client, which could stop the bridge from receiving further commands: a thermostat label that doesn't exist (e.g. `ecobee/typo/set/target`), a number like `inf`, or any unexpected error while applying the command. These are now logged and ignored.
@@ -18,6 +19,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - `--dump` left a HomeKit connection open (and a socket leaking) when the thermostat didn't answer. The same leak was fixed for normal connections in 1.1.1.
 
 ### Changed
+- "No pairing files found" now says which folder was searched and points to `ecobee-pair` and `--folder` (it named the old `pair_ecobee.py`).
 - Requires Python 3.10+. `aiohomekit` 3.0 and later already required it, so installs on 3.9 were failing anyway.
 - Removed the duplicate `ecobee_mqtt.py` from the repository root. It was never part of the package; use `ecobee-mqtt` or `python -m ecobee_local.mqtt`.
 

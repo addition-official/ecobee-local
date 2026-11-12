@@ -305,3 +305,16 @@ def test_default_app_folder(monkeypatch, tmp_path):
     monkeypatch.setattr(c.sys, "platform", "win32")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     assert c.default_app_folder() == str(tmp_path / "local" / "ecobee-local")
+
+
+def test_from_folder_skips_json_that_is_not_a_pairing(tmp_path):
+    # a project folder with pairing files next to the app's own JSON files
+    write_pair_file(tmp_path, "pair.json", label="main")
+    write_pair_file(tmp_path, "pair1.json", label="up")
+    (tmp_path / "config.json").write_text(json.dumps({"theme": "dark"}))
+    (tmp_path / "secrets.json").write_text(json.dumps({"api_key": "x"}))
+    (tmp_path / "events.json").write_text(json.dumps([1, 2, 3]))
+    (tmp_path / "empty.json").write_text("")
+    (tmp_path / "broken.json").write_text("{not json")
+    ec = EcobeeController.from_folder(app_folder=str(tmp_path))
+    assert ec.labels == ["main", "up"]
