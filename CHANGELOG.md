@@ -55,6 +55,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - `--dump` left a HomeKit connection open (and a socket leaking) when the thermostat didn't answer. The same leak was fixed for normal connections in 1.1.1.
 
 ### Changed
+- The GitHub workflows pin every action to an exact commit and give jobs a read-only token unless they need more (only the PyPI upload gets `id-token: write`).
 - One-shot `ecobee-hub` commands close their thermostat connections before exiting, freeing the thermostat's limited HomeKit connection slots right away.
 - Messages, help text and comments that still named the old scripts (`pair_ecobee.py`, `ecobee_controller.py`, `ecobee_mqtt.py`) now name the `ecobee-pair`, `ecobee-hub` and `ecobee-mqtt` commands.
 - "No pairing files found" now says which folder was searched and points to `ecobee-pair` and `--folder` (it named the old `pair_ecobee.py`).

@@ -3,19 +3,27 @@ name: Publish to PyPI
 # Publish a GitHub release with a tag like v1.2.0 (or push the tag yourself)
 # and this builds the package and uploads it to PyPI.
 # Uses PyPI trusted publishing, so no API token is stored in GitHub.
+# Actions are pinned to exact commits (version in the comment) so a
+# re-pointed tag upstream can't change what runs during a release.
 
 on:
   push:
     tags:
       - "v*"
 
+# read-only token unless a job asks for more
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.13"
 
@@ -44,7 +52,7 @@ jobs:
           ecobee-pair --help
           ecobee-mqtt --help
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist
           path: dist/
@@ -56,9 +64,9 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: dist
           path: dist/
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
