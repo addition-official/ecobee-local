@@ -218,3 +218,29 @@ def test_commands_do_not_sleep_a_fixed_time(hub, device):
     hub("--label", "main", "--set-temp", "70")
     assert hub.sleeps == []
     assert (*TARGET_TEMP, 21.0) in device.writes
+
+
+# ---------------------------------------------------------------- --status
+
+def test_status_prints_and_exits(hub, device, capsys):
+    assert hub("--status") in (None, 0)
+    out = capsys.readouterr().out
+    assert "main (Main Floor) {'online': True" in out
+    assert "- Bedroom: 66F empty batt 87%" in out
+    assert "headless service running" not in out
+    assert "control window" not in out
+    assert device.writes == []
+    assert device.pairings[0].closed          # connections closed on exit
+
+
+def test_status_for_one_label(hub, device, pair_folder, capsys):
+    write_pair_file(pair_folder, "pair1.json", label="up", name="Upstairs")
+    hub("--status", "--label", "up")
+    out = capsys.readouterr().out
+    assert "up (Upstairs)" in out
+    assert "main (Main Floor)" not in out
+
+
+def test_one_shot_action_closes_connections(hub, device):
+    hub("--label", "main", "--set-temp", "70")
+    assert all(p.closed for p in device.pairings)

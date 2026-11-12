@@ -1866,6 +1866,10 @@ def main():
         help="print HomeKit connection and subscription events (noisy)",
     )
     parser.add_argument(
+        "--status", action="store_true",
+        help="print each thermostat's status (or just --label's), then exit",
+    )
+    parser.add_argument(
         "--headless", action="store_true",
         help="run as a background service (print status, stay alive) instead "
              "of opening the control window",
@@ -1920,9 +1924,11 @@ def main():
     any_action = any(v is not None for v in (
         args.set_temp, args.set_mode, args.set_heat, args.set_cool,
         args.set_fan, args.set_humidity, args.set_comfort))
+    # run once and exit (vs. the GUI or the --headless service)
+    one_shot = any_action or args.status
 
     # Default (no action flags, not --headless): open the control window.
-    if not any_action and not args.headless:
+    if not one_shot and not args.headless:
         ec.start()
         print("opening control window (use --headless for no GUI)...")
         try:
@@ -1955,6 +1961,8 @@ def main():
                   ec.set_comfort_mode(args.label, args.set_comfort))
 
     for t in ec.list_thermostats():
+        if args.status and args.label and t["label"] != args.label:
+            continue
         st = ec.get_status(t["label"])
         sensors = st.pop("sensors", [])
         print(t["label"], f"({t['name']})", st)
@@ -1966,7 +1974,7 @@ def main():
 
     # In headless mode with no action, keep running as a live service so the
     # cache stays fresh (useful as a backend for another app).
-    if args.headless and not any_action:
+    if args.headless and not one_shot:
         print("headless service running; Ctrl+C to stop.")
         try:
             while True:
@@ -1974,6 +1982,8 @@ def main():
         except KeyboardInterrupt:
             print("\nstopping...")
             ec.stop()
+    else:
+        ec.stop()   # one-shot run: close the connections cleanly
 
 
 if __name__ == "__main__":
