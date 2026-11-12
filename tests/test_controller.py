@@ -532,3 +532,30 @@ def test_wait_ready_before_start_and_without_connect(device, pair_folder,
     ec.start(connect=False)
     assert ec.wait_ready(timeout=2) is False   # nothing was connected
     assert device.pairings == []
+
+
+# -------------------------------------------------------- with-statement
+
+def test_with_block_connects_and_closes(device, pair_folder):
+    with EcobeeController.from_folder(app_folder=str(pair_folder),
+                                      poll_interval=3600) as ec:
+        # already connected on entry: real readings straight away
+        assert ec.get_status("main")["online"] is True
+        assert ec.set_temp("main", 70) == {"ok": True}
+    assert device.pairings[0].closed
+    assert ec.get_status("main")["online"] is False
+
+
+def test_with_block_closes_on_error(device, pair_folder):
+    with pytest.raises(ZeroDivisionError):
+        with EcobeeController.from_folder(app_folder=str(pair_folder),
+                                          poll_interval=3600) as ec:
+            1 / 0
+    assert device.pairings[0].closed
+
+
+def test_with_block_offline_thermostat(device, pair_folder):
+    device.connect_exc = OSError("unreachable")
+    with EcobeeController.from_folder(app_folder=str(pair_folder),
+                                      poll_interval=3600) as ec:
+        assert ec.get_status("main")["online"] is False

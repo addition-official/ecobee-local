@@ -359,6 +359,20 @@ class EcobeeController:
         threading.Thread(target=self._thread_main, daemon=True).start()
         self._loop_ready.wait(timeout=wait_timeout)
 
+    def __enter__(self):
+        """
+        with EcobeeController.from_folder() as ec: ...
+        Starts the controller and waits for the first connections (see
+        wait_ready), and always stops it on the way out, even on an error.
+        """
+        self.start()
+        self.wait_ready()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.stop()
+        return False
+
     def wait_ready(self, timeout=30.0):
         """
         Block until every thermostat has had its first connection attempt
