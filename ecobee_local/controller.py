@@ -171,8 +171,14 @@ def _has_value(readings, cid):
     characteristic it couldn't read (busy, timed out, ...) as
     {"status": <code>, "description": ...} with no "value"; such a failure
     must not take the whole thermostat offline, it just means "no new value".
+    A value of None (some firmwares send null) counts as no value too.
     """
-    return bool(cid) and "value" in (readings.get(cid) or {})
+    return bool(cid) and (readings.get(cid) or {}).get("value") is not None
+
+
+# what converting a value the device sent can raise: None/text where a number
+# belongs (TypeError/ValueError), NaN (ValueError) or infinity (OverflowError)
+_BAD_VALUE = (TypeError, ValueError, OverflowError)
 
 
 def _write_error(result):
@@ -744,21 +750,26 @@ class EcobeeController:
         return out
 
     def _apply_reading(self, label, main_ids, sensor_specs, readings):
-        # A characteristic that failed to read keeps its last good value (or
-        # "--" if it has never been read); the thermostat stays online.
+        # A characteristic that failed to read, or sent a value that can't be
+        # used, keeps its last good value (or "--" if it has never been
+        # read); the thermostat stays online.
         cache = self.cache[label]
         for key in _UUID:
             cid = main_ids.get(key)
             if not _has_value(readings, cid):
                 continue
             raw = readings[cid]["value"]
-            if key in _TEMP_KEYS:
-                cache[key] = _c_to_f(raw)      # Fahrenheit (rounded int)
-                cache[key + "_c"] = raw        # raw Celsius from the device
-            elif key == "humidity":
-                cache[key] = int(round(raw))
-            else:  # integer state characteristics
-                cache[key] = int(raw)
+            try:
+                if key in _TEMP_KEYS:
+                    f = _c_to_f(raw)
+                    cache[key] = f                 # Fahrenheit (rounded int)
+                    cache[key + "_c"] = raw        # raw Celsius from device
+                elif key == "humidity":
+                    cache[key] = int(round(raw))
+                else:  # integer state characteristics
+                    cache[key] = int(raw)
+            except _BAD_VALUE:
+                continue
 
         # comfort profile (ecobee vendor characteristic), if this model has it.
         # Guard: if the user set a comfort mode within the last few seconds,
@@ -776,7 +787,7 @@ class EcobeeController:
             try:
                 cache["comfort_mode"] = _COMFORT_NAMES.get(int(raw), "hold")
                 cache["comfort_raw"] = int(raw)
-            except (TypeError, ValueError):
+            except _BAD_VALUE:
                 cache["comfort_mode"] = "--"
                 cache["comfort_raw"] = None
         elif cid and cid in readings:
@@ -795,13 +806,15 @@ class EcobeeController:
             if not s["name"]:
                 s["name"] = "Built-in" if s["builtin"] else f"Sensor {i+1}"
             # temperature -> F, plus raw Celsius
+            # (a sensor value that failed or can't be used is None)
             tid = spec.get("temperature")
+            s["temperature"] = s["temperature_c"] = None
             if _has_value(readings, tid):
-                s["temperature"] = _c_to_f(readings[tid]["value"])
-                s["temperature_c"] = readings[tid]["value"]
-            else:
-                s["temperature"] = None
-                s["temperature_c"] = None
+                try:
+                    s["temperature"] = _c_to_f(readings[tid]["value"])
+                    s["temperature_c"] = readings[tid]["value"]
+                except _BAD_VALUE:
+                    pass
             # occupancy / motion -> bool
             for k in ("occupancy", "motion"):
                 cid = spec.get(k)
@@ -812,8 +825,12 @@ class EcobeeController:
                     s[k] = None
             # battery + low battery
             bid = spec.get("battery")
-            s["battery"] = (int(readings[bid]["value"])
-                            if _has_value(readings, bid) else None)
+            s["battery"] = None
+            if _has_value(readings, bid):
+                try:
+                    s["battery"] = int(readings[bid]["value"])
+                except _BAD_VALUE:
+                    pass
             lid = spec.get("low_battery")
             s["low_battery"] = (bool(readings[lid]["value"])
                                 if _has_value(readings, lid) else None)

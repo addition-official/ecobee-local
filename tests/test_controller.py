@@ -13,7 +13,8 @@ from ecobee_local import EcobeeController
 
 from conftest import (
     COMFORT_READ, COMFORT_WRITE, COOL_THRESHOLD, CREDS, CURRENT_TEMP,
-    DISPLAY_UNITS, HEAT_THRESHOLD, HUMIDITY, MODE, SENSOR_TEMP, TARGET_FAN, TARGET_TEMP, build_accessories, run_async, wait_until, write_pair_file,
+    DISPLAY_UNITS, HEAT_THRESHOLD, HUMIDITY, MODE, SENSOR_BATTERY,
+    SENSOR_LOW_BATTERY, SENSOR_TEMP, TARGET_FAN, TARGET_TEMP, build_accessories, run_async, wait_until, write_pair_file,
 )
 
 
@@ -465,3 +466,28 @@ def test_timed_out_dump_returns_error(device, pair_folder, make_controller):
     ec.start(connect=False)
     res = ec.dump_characteristics("main", timeout=0.1)
     assert res["ok"] is False and "timed out" in res["error"]
+
+
+# ------------------------------------------------- values that can't be used
+
+def test_unusable_values_keep_last_reading(connected, device):
+    device.values.update({
+        TARGET_TEMP: None,              # present but empty
+        MODE: "cool",                   # text where a number belongs
+        HUMIDITY: float("inf"),
+        HEAT_THRESHOLD: float("nan"),
+        CURRENT_TEMP: 23.0,             # a good value in the same reading
+        SENSOR_TEMP: "warm",
+        SENSOR_BATTERY: "full",
+        SENSOR_LOW_BATTERY: None,
+    })
+    connected.refresh("main")
+    st = connected.get_status("main")
+    assert st["online"] is True
+    assert len(device.pairings) == 1
+    assert st["current_temp"] == 73
+    assert st["target_temp"] == 72 and st["mode"] == 1
+    assert st["humidity"] == 45 and st["heat_threshold"] == 68
+    bedroom = st["sensors"][1]
+    assert bedroom["temperature"] is None and bedroom["temperature_c"] is None
+    assert bedroom["battery"] is None and bedroom["low_battery"] is None
