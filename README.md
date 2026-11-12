@@ -26,7 +26,7 @@ Or clone this repo and `pip install .` to build the exact package that's publish
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10+
 - Dependencies `aiohomekit` and `zeroconf` (installed automatically by pip, or via `pip install -r requirements.txt`)
 - Tkinter for the GUI. It ships with Python on Windows and macOS. On some Linux distros it's a separate package: `sudo apt install python3-tk`.
 
@@ -174,6 +174,7 @@ ecobee_local/
     controller.py     the library, CLI, and GUI
     pair.py           the pairing wizard
     mqtt.py           optional MQTT bridge (needs the [mqtt] extra)
+tests/                pytest suite (no thermostat or network needed)
 pyproject.toml        packaging / build config
 requirements.txt      dependencies
 LICENSE               MIT

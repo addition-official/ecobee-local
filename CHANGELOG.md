@@ -10,6 +10,10 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 ### Fixed
 - `--dump` left a HomeKit connection open (and a socket leaking) when the thermostat didn't answer. The same leak was fixed for normal connections in 1.1.1.
 
+### Changed
+- Requires Python 3.10+. `aiohomekit` 3.0 and later already required it, so installs on 3.9 were failing anyway.
+- Removed the duplicate `ecobee_mqtt.py` from the repository root. It was never part of the package; use `ecobee-mqtt` or `python -m ecobee_local.mqtt`.
+
 ## 1.1.1
 
 ### Fixed

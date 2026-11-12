@@ -7,7 +7,7 @@ name = "ecobee-local"
 version = "1.2.0"
 description = "Control an Ecobee thermostat locally over HomeKit. No cloud, no developer key, no Home Assistant."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "addition-official" }]
 keywords = ["ecobee", "homekit", "thermostat", "smart-home", "aiohomekit", "local"]
@@ -23,6 +23,7 @@ dependencies = [
     "aiohomekit>=3.0",
     "zeroconf>=0.130",
 ]
+
 [project.optional-dependencies]
 mqtt = ["paho-mqtt>=2.0"]
 
@@ -38,3 +39,6 @@ ecobee-mqtt = "ecobee_local.mqtt:main"
 
 [tool.setuptools]
 packages = ["ecobee_local"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
