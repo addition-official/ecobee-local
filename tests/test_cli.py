@@ -10,8 +10,8 @@ import ecobee_local.controller as c
 from ecobee_local import EcobeeController
 
 from conftest import (
-    COMFORT_WRITE, COOL_THRESHOLD, HEAT_THRESHOLD, MODE, TARGET_TEMP,
-    write_pair_file,
+    COMFORT_WRITE, COOL_THRESHOLD, HEAT_THRESHOLD, MODE, SENSOR_OCCUPANCY,
+    TARGET_TEMP, wait_until, write_pair_file,
 )
 
 REAL_SLEEP = time.sleep
@@ -42,9 +42,13 @@ def hub(monkeypatch, device, pair_folder):
 
     sleeps = []
 
+    while_running = []      # functions to run while the service is up
+
     def fake_sleep(seconds):
         sleeps.append(seconds)
         if seconds >= 3600:
+            for fn in while_running:
+                fn(made[0])
             raise KeyboardInterrupt
         end = time.monotonic() + 5
         while time.monotonic() < end and not connect_finished():
@@ -65,6 +69,7 @@ def hub(monkeypatch, device, pair_folder):
         return None
 
     run.sleeps = sleeps
+    run.while_running = while_running
     yield run
     for ec in made:
         ec.stop()
@@ -290,3 +295,66 @@ def test_celsius_option_needs_label(hub, device, capsys):
 def test_celsius_option_rejects_non_numbers(hub, device, capsys, value):
     assert hub("--label", "main", "--set-temp-c", value) == 2
     assert device.writes == []
+
+
+# ----------------------------------------------------------------- --watch
+
+def change_target(device, celsius, label="main"):
+    """While --watch runs: the thermostat reports a new target."""
+    def fn(ec):
+        device.values[TARGET_TEMP] = celsius
+        ec._state[label]["pairing"].callback(
+            {TARGET_TEMP: {"value": celsius}})
+        assert wait_until(
+            lambda: ec._last_seen[label]["target_temp_c"] == celsius)
+    return fn
+
+
+def test_watch_prints_changes(hub, device, capsys):
+    hub.while_running.append(change_target(device, 23.0))
+    hub("--watch")
+    out = capsys.readouterr().out
+    assert "main (Main Floor) {'online': True" in out      # initial status
+    assert "watching for changes; Ctrl+C to stop." in out
+    line = [l for l in out.splitlines() if "target_temp 72 -> 73" in l]
+    assert line and "main (Main Floor):" in line[0]
+    assert "stopping..." in out
+    assert device.pairings[0].closed
+
+
+def test_watch_prints_sensor_and_offline_changes(hub, device, capsys):
+    def fn(ec):
+        device.values[SENSOR_OCCUPANCY] = 1
+        ec.refresh("main")
+        device.read_exc = OSError("gone")
+        device.connect_exc = OSError("gone")
+        ec.refresh("main")
+    hub.while_running.append(fn)
+    hub("--watch")
+    out = capsys.readouterr().out
+    assert "Bedroom occupancy False -> True" in out
+    assert "online True -> False" in out          # went offline
+
+
+def test_watch_does_not_report_its_own_shutdown(hub, device, capsys):
+    hub("--watch")
+    out = capsys.readouterr().out
+    assert "->" not in out
+    assert device.pairings[0].closed
+
+
+def test_watch_one_label(hub, device, pair_folder, capsys):
+    write_pair_file(pair_folder, "pair1.json", label="up", name="Upstairs")
+    hub.while_running.append(change_target(device, 23.0, label="up"))
+    hub("--watch", "--label", "up")
+    out = capsys.readouterr().out
+    assert "main (Main Floor)" not in out
+    assert "up (Upstairs):" in out and "target_temp 72 -> 73" in out
+
+
+def test_watch_ignores_celsius_only_wobble(hub, device, capsys):
+    # 22.0C -> 22.1C is still 72F: not worth a line
+    hub.while_running.append(change_target(device, 22.1))
+    hub("--watch")
+    out = capsys.readouterr().out
+    assert "->" not in out

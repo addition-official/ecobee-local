@@ -1,6 +1,7 @@
 """Talking to the (fake) thermostat: connecting, writing, and failing."""
 
 import asyncio
+import sys
 import time
 
 import pytest
@@ -262,7 +263,7 @@ def test_write_exception_is_reported(connected, device):
     assert connected.cache["main"]["mode"] == 1
 
 
-@pytest.mark.filterwarnings("ignore:coroutine .* was never awaited")
+@pytest.mark.filterwarnings("error")
 def test_calls_before_start():
     ec = EcobeeController({"main": "/nope.json"})
     assert ec.set_temp("main", 70) == {"ok": False,
@@ -559,3 +560,165 @@ def test_with_block_offline_thermostat(device, pair_folder):
     with EcobeeController.from_folder(app_folder=str(pair_folder),
                                       poll_interval=3600) as ec:
         assert ec.get_status("main")["online"] is False
+
+
+# -------------------------------------------------------------- on_change
+
+class Recorder:
+    def __init__(self):
+        self.events = []
+
+    def __call__(self, label, status):
+        self.events.append((label, status))
+
+    def last(self):
+        return self.events[-1][1] if self.events else None
+
+
+def test_on_change_reports_first_connection(device, pair_folder,
+                                            make_controller):
+    ec = make_controller(pair_folder)
+    rec = Recorder()
+    ec.on_change(rec)
+    ec.start()
+    assert ec.wait_ready(timeout=5)
+    assert wait_until(lambda: rec.events)
+    label, status = rec.events[-1]
+    assert label == "main" and status["online"] is True
+    assert status["target_temp"] == 72 and status["sensors"]
+
+
+def test_on_change_from_device_push(connected, device):
+    rec = Recorder()
+    connected.on_change(rec)
+    device.values[TARGET_TEMP] = 23.0
+    device.pairings[0].callback({TARGET_TEMP: {"value": 23.0}})
+    assert wait_until(lambda: rec.last() and rec.last()["target_temp"] == 73)
+    assert rec.last()["display_target"] == 73
+
+
+def test_on_change_only_on_real_changes(connected, device):
+    rec = Recorder()
+    connected.on_change(rec)
+    connected.refresh("main")
+    connected.refresh("main")
+    assert rec.events == []
+    device.values[SENSOR_BATTERY] = 50
+    connected.refresh("main")
+    assert len(rec.events) == 1
+    assert rec.last()["sensors"][1]["battery"] == 50
+
+
+def test_on_change_from_own_command(connected, device):
+    rec = Recorder()
+    connected.on_change(rec)
+    assert connected.set_mode("main", 2)["ok"]
+    assert rec.last()["mode"] == 2
+    connected.set_mode("main", 2)               # same value: no event
+    assert len(rec.events) == 1
+
+
+def test_on_change_offline_and_stop(connected, device):
+    rec = Recorder()
+    connected.on_change(rec)
+    device.read_exc = AccessoryDisconnectedError("gone")
+    device.connect_exc = OSError("unreachable")
+    connected.refresh("main")
+    assert rec.last()["online"] is False
+    device.read_exc = device.connect_exc = None
+    connected.refresh("main")
+    assert rec.last()["online"] is True
+    connected.stop()
+    assert rec.last()["online"] is False
+
+
+def test_on_change_unsubscribe(connected, device):
+    rec = Recorder()
+    remove = connected.on_change(rec)
+    remove()
+    remove()                                    # harmless twice
+    connected.set_mode("main", 0)
+    assert rec.events == []
+
+
+def test_on_change_gets_a_copy(connected, device):
+    def scribble(label, status):
+        status["target_temp"] = -1
+        status["sensors"].clear()
+    connected.on_change(scribble)
+    connected.set_temp("main", 70)
+    st = connected.get_status("main")
+    assert st["target_temp"] == 70 and st["sensors"]
+
+
+def test_failing_callback_is_logged_and_others_still_run(connected, device,
+                                                         capsys):
+    rec = Recorder()
+
+    def broken(label, status):
+        raise ValueError("oops")
+    connected.on_change(broken)
+    connected.on_change(rec)
+    assert connected.set_mode("main", 2)["ok"]
+    assert rec.events
+    assert "on_change callback failed: ValueError: oops" in \
+        capsys.readouterr().err
+    assert connected.set_mode("main", 3)["ok"]    # still working
+
+
+def test_commands_from_a_callback_fail_instead_of_freezing(connected,
+                                                           device):
+    results = []
+
+    def nested(label, status):
+        if not results:
+            results.append(connected.set_temp(label, 60))
+    connected.on_change(nested)
+    t0 = time.monotonic()
+    assert connected.set_mode("main", 2)["ok"]
+    assert time.monotonic() - t0 < 2
+    assert results[0]["ok"] is False
+    assert "on_change callback" in results[0]["error"]
+    assert connected.set_temp("main", 71)["ok"]   # controller not stuck
+
+
+def test_stop_from_a_callback_is_refused(connected, device, capsys):
+    connected.on_change(lambda label, status: connected.stop())
+    assert connected.set_mode("main", 2)["ok"]
+    assert "can't be called from an on_change callback" in \
+        capsys.readouterr().err
+    assert connected.set_mode("main", 1)["ok"]
+
+
+def test_stop_while_still_connecting_finishes_cleanly(device, pair_folder,
+                                                      make_controller):
+    # used to leave the startup task pending, so Python printed
+    # "Task was destroyed but it is pending!" when the program exited
+    device.hang = True
+    ec = make_controller(pair_folder)
+    ec.start()
+    assert ec.wait_ready(timeout=0.1) is False
+    ec.stop()
+    # once the loop has stopped nothing can finish the task any more, so it
+    # must already be done by then
+    assert wait_until(lambda: not ec._loop.is_running())
+    assert ec._main_task.done()
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11),
+    reason="wait_for runs the call as a separate task before Python 3.11, "
+           "so the fake can't turn the cancel into an error this way")
+def test_stop_survives_a_swallowed_cancel(device, pair_folder,
+                                          make_controller):
+    # the connection code turns stop()'s cancel into its own error, which
+    # the controller treats as a failed connect and carries on to its next
+    # poll; stop() has to cancel again
+    device.hang = True
+    device.swallow_cancel = True
+    ec = make_controller(pair_folder)
+    ec.start()
+    assert ec.wait_ready(timeout=0.1) is False
+    ec.stop()
+    assert wait_until(lambda: not ec._loop.is_running())
+    assert ec._main_task.done()

@@ -190,6 +190,10 @@ class FakeDevice:
         self.read_errors = {}     # {(aid, iid): hap status code}
         self.write_errors = {}    # {(aid, iid): hap status code}
         self.hang = False
+        # turn a cancel into an ordinary error, as connection code can when
+        # it's torn down mid-call (and as Python 3.10's asyncio.wait_for can
+        # in a race)
+        self.swallow_cancel = False
         self.connect_delay = 0    # seconds before connecting succeeds/fails
         self.write_delay = 0      # seconds before a write is applied
         self.writes = []          # every (aid, iid, value) written
@@ -198,7 +202,17 @@ class FakeDevice:
 
     async def _maybe_hang(self):
         if self.hang:
-            await asyncio.sleep(3600)
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                # like a real connection closing its socket, cancelling
+                # takes a few trips round the event loop
+                for _ in range(20):
+                    await asyncio.sleep(0)
+                if self.swallow_cancel:
+                    self.hang = False
+                    raise OSError("connection closed")
+                raise
 
 
 class FakePairing:

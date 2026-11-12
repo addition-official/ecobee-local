@@ -53,6 +53,8 @@ Modes (HomeKit TargetHeatingCoolingState): 0=off, 1=heat, 2=cool, 3=auto.
 
 import asyncio
 import concurrent.futures
+import copy
+import functools
 import glob
 import json
 import os
@@ -223,6 +225,26 @@ def _read_meta(path):
         return stem, stem
 
 
+def _notifies(method):
+    """
+    Decorator for async methods that take a label and may change that
+    thermostat's status: tell on_change listeners afterwards (only if the
+    status actually changed; see EcobeeController._notify).
+    """
+    @functools.wraps(method)
+    async def wrapper(self, label, *args, **kwargs):
+        try:
+            return await method(self, label, *args, **kwargs)
+        finally:
+            self._notify(label)
+    return wrapper
+
+
+_CALLBACK_THREAD_ERROR = (
+    "can't be called from an on_change callback (callbacks run on the "
+    "controller's own thread); hand the work to another thread instead")
+
+
 class EcobeeController:
     MODE_OFF = 0
     MODE_HEAT = 1
@@ -283,7 +305,13 @@ class EcobeeController:
             for label in self.labels
         }
 
+        # on_change listeners, and the last status each one was told about
+        self._listeners = []
+        self._last_seen = {label: self._snapshot(label)
+                           for label in self.labels}
+
         self._loop = None
+        self._loop_thread = None
         self._loop_ready = threading.Event()
         # set once every thermostat has had its first connection attempt
         self._first_connect_done = threading.Event()
@@ -334,6 +362,8 @@ class EcobeeController:
         self._names[label] = name or file_name
         self.labels.append(label)
         self.cache[label] = _blank_cache()
+        self._comfort_hold[label] = 0
+        self._last_seen[label] = self._snapshot(label)
         self._state[label] = {"pairing": None, "ids": None, "sensors": None, "lock": None}
         return label
 
@@ -397,14 +427,26 @@ class EcobeeController:
         """
         if not self._started or self._loop is None:
             return
+        if self._on_loop_thread():
+            raise RuntimeError(f"stop() {_CALLBACK_THREAD_ERROR}")
         loop = self._loop
 
         async def _shutdown():
             # cancel the background health loop so it isn't left pending when
             # the loop stops (avoids a harmless "Task was destroyed" warning)
             task = getattr(self, "_main_task", None)
-            if task is not None:
+            # Wait for the cancellation to finish (a connection still being
+            # made takes a few loop iterations to unwind); otherwise the loop
+            # stops first and Python prints "Task was destroyed but it is
+            # pending!" at exit. Cancel more than once: a cancel can get
+            # lost (Python 3.10's asyncio.wait_for swallows one that arrives
+            # just as the call inside it finishes, and connection code can
+            # turn it into its own error), and the task then carries on.
+            for _ in range(4):
+                if task is None or task.done():
+                    break
                 task.cancel()
+                await asyncio.wait({task}, timeout=0.5)
             for label in self.labels:
                 st = self._state.get(label, {})
                 pairing = st.get("pairing")
@@ -415,6 +457,7 @@ class EcobeeController:
                         pass
                     st["pairing"] = None
                 self.cache[label]["online"] = False
+                self._notify(label)
 
         try:
             fut = asyncio.run_coroutine_threadsafe(_shutdown(), loop)
@@ -426,6 +469,49 @@ class EcobeeController:
         except Exception:
             pass
         self._started = False
+
+    def on_change(self, callback):
+        """
+        Call callback(label, status) whenever a thermostat's status changes,
+        from anywhere: the thermostat itself, the ecobee app, a schedule, a
+        sensor, going online/offline, or a command from this controller.
+        status is the same dict get_status(label) returns (a copy).
+
+        Returns a function that removes the callback again.
+
+        Callbacks run on the controller's background thread, so keep them
+        quick. They can't call this controller's commands (set_temp, ...):
+        those return an error there. Hand such work to another thread.
+        An exception in a callback is printed and otherwise ignored.
+        """
+        self._listeners.append(callback)
+
+        def remove():
+            if callback in self._listeners:
+                self._listeners.remove(callback)
+        return remove
+
+    def _snapshot(self, label):
+        return copy.deepcopy(self._status_for(label))
+
+    def _notify(self, label):
+        """Tell listeners about label's status if it changed since last time."""
+        if label not in self.cache:
+            return
+        status = self._snapshot(label)
+        if status == self._last_seen.get(label):
+            return
+        self._last_seen[label] = status
+        for callback in list(self._listeners):
+            try:
+                callback(label, copy.deepcopy(status))
+            except Exception as e:
+                print(f"[{label}] on_change callback failed: "
+                      f"{type(e).__name__}: {e}", file=sys.stderr)
+
+    def _on_loop_thread(self):
+        return (self._loop_thread is not None
+                and threading.get_ident() == self._loop_thread)
 
     def get_status(self, label=None):
         """
@@ -613,7 +699,12 @@ class EcobeeController:
 
     def _run(self, coro, timeout=12.0):
         if self._loop is None:
+            coro.close()
             return {"ok": False, "error": "controller not started"}
+        if self._on_loop_thread():
+            # waiting here would block the very loop that has to do the work
+            coro.close()
+            return {"ok": False, "error": f"commands {_CALLBACK_THREAD_ERROR}"}
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
             return fut.result(timeout=timeout)
@@ -632,6 +723,7 @@ class EcobeeController:
 
     def _thread_main(self):
         self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.get_ident()
         asyncio.set_event_loop(self._loop)
         # queue _main before signalling ready, so it runs (and creates the
         # per-thermostat locks) before any call the caller makes after start()
@@ -912,6 +1004,7 @@ class EcobeeController:
                     print(f"[{label}] callback reschedule failed: {e}")
         return _cb
 
+    @_notifies
     async def _connect(self, label):
         path = self._pair_paths[label]
         if not os.path.exists(path):
@@ -975,6 +1068,7 @@ class EcobeeController:
             self._state[label]["pairing"] = None
             return False
 
+    @_notifies
     async def _refresh(self, label):
         st = self._state[label]
         async with st["lock"]:
@@ -1007,6 +1101,7 @@ class EcobeeController:
     async def _set_mode(self, label, mode_int):
         return await self._set_int_char(label, "mode", int(mode_int))
 
+    @_notifies
     async def _set_temp_char(self, label, key, temp_f=None, temp_c=None):
         """
         Write a temperature characteristic. Provide either temp_f (Fahrenheit,
@@ -1043,6 +1138,7 @@ class EcobeeController:
             except Exception as e:
                 return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+    @_notifies
     async def _set_int_char(self, label, key, value):
         """Write an integer-valued state characteristic."""
         st = self._state[label]
@@ -1068,6 +1164,7 @@ class EcobeeController:
             except Exception as e:
                 return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+    @_notifies
     async def _set_comfort(self, label, value):
         """Write the comfort-profile selector (ecobee vendor characteristic)."""
         st = self._state[label]
@@ -1829,6 +1926,33 @@ def launch_gui(ec, poll_ms=2000):
 
 _MODE_NAMES = {"off": 0, "heat": 1, "cool": 2, "auto": 3}
 
+# what ecobee-hub --watch compares (the Fahrenheit/rounded fields; the raw
+# Celsius ones wobble by 0.1 without anything visible changing)
+_WATCH_KEYS = ("online", "current_temp", "target_temp", "heat_threshold",
+               "cool_threshold", "mode", "running_state", "target_fan",
+               "current_fan", "humidity", "target_humidity", "comfort_mode",
+               "display_units")
+_WATCH_SENSOR_KEYS = ("temperature", "occupancy", "motion", "battery",
+                      "low_battery")
+
+
+def _describe_changes(old, new):
+    """List of 'what old -> new' strings between two get_status() dicts."""
+    changes = [f"{k} {old.get(k)} -> {new.get(k)}"
+               for k in _WATCH_KEYS if old.get(k) != new.get(k)]
+    old_s = {s["name"]: s for s in old.get("sensors") or []}
+    new_s = {s["name"]: s for s in new.get("sensors") or []}
+    for name, sensor in new_s.items():
+        before = old_s.get(name)
+        if before is None:
+            changes.append(f"sensor {name} added")
+            continue
+        changes += [f"{name} {k} {before.get(k)} -> {sensor.get(k)}"
+                    for k in _WATCH_SENSOR_KEYS
+                    if before.get(k) != sensor.get(k)]
+    changes += [f"sensor {name} removed" for name in old_s if name not in new_s]
+    return changes
+
 
 def _parse_mode(text):
     """argparse type for --set-mode: a name (off/heat/cool/auto) or 0-3."""
@@ -1920,6 +2044,11 @@ def main():
         help="print each thermostat's status (or just --label's), then exit",
     )
     parser.add_argument(
+        "--watch", action="store_true",
+        help="keep running and print a line whenever a thermostat (or just "
+             "--label's) changes; Ctrl+C to stop",
+    )
+    parser.add_argument(
         "--headless", action="store_true",
         help="run as a background service (print status, stay alive) instead "
              "of opening the control window",
@@ -1975,10 +2104,10 @@ def main():
     # Did the user request a specific one-shot action?
     any_action = any(v is not None for v in actions.values())
     # run once and exit (vs. the GUI or the --headless service)
-    one_shot = any_action or args.status
+    one_shot = (any_action or args.status) and not args.watch
 
     # Default (no action flags, not --headless): open the control window.
-    if not one_shot and not args.headless:
+    if not one_shot and not args.headless and not args.watch:
         ec.start()
         print("opening control window (use --headless for no GUI)...")
         try:
@@ -2019,7 +2148,8 @@ def main():
                   ec.set_comfort_mode(args.label, args.set_comfort))
 
     for t in ec.list_thermostats():
-        if args.status and args.label and t["label"] != args.label:
+        if (args.status or args.watch) and args.label \
+                and t["label"] != args.label:
             continue
         st = ec.get_status(t["label"])
         sensors = st.pop("sensors", [])
@@ -2032,7 +2162,30 @@ def main():
 
     # In headless mode with no action, keep running as a live service so the
     # cache stays fresh (useful as a backend for another app).
-    if args.headless and not one_shot:
+    if args.watch:
+        watched = [args.label] if args.label else list(ec.labels)
+        previous = {label: ec.get_status(label) for label in watched}
+
+        def show_change(label, status):
+            if label not in previous:
+                return
+            changes = _describe_changes(previous[label], status)
+            previous[label] = status
+            if changes:
+                print(f"{time.strftime('%H:%M:%S')} {label} "
+                      f"({ec.get_name(label)}): {', '.join(changes)}",
+                      flush=True)
+
+        stop_watching = ec.on_change(show_change)
+        print("watching for changes; Ctrl+C to stop.", flush=True)
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            print("\nstopping...")
+            stop_watching()     # our own shutdown isn't a change to report
+            ec.stop()
+    elif args.headless and not one_shot:
         print("headless service running; Ctrl+C to stop.")
         try:
             while True:
