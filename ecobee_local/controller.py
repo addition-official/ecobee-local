@@ -52,6 +52,7 @@ Modes (HomeKit TargetHeatingCoolingState): 0=off, 1=heat, 2=cool, 3=auto.
 """
 
 import asyncio
+import concurrent.futures
 import glob
 import json
 import os
@@ -558,7 +559,20 @@ class EcobeeController:
         if self._loop is None:
             return {"ok": False, "error": "controller not started"}
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return fut.result(timeout=timeout)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            if fut.done():
+                # the call itself finished (on Python 3.11+ a TimeoutError
+                # raised inside it is this same class): pass its outcome on
+                return fut.result()
+            # We gave up waiting. Return an error like every other failure
+            # (callers expect an {'ok': ...} dict) and cancel the call, so a
+            # write that was still waiting (e.g. behind a reconnect) doesn't
+            # land later after the caller was already told it failed.
+            fut.cancel()
+            return {"ok": False,
+                    "error": "timed out (thermostat busy or reconnecting)"}
 
     def _thread_main(self):
         self._loop = asyncio.new_event_loop()

@@ -1,6 +1,7 @@
 """Talking to the (fake) thermostat: connecting, writing, and failing."""
 
 import asyncio
+import time
 
 import pytest
 from aiohomekit.exceptions import (
@@ -440,3 +441,27 @@ def test_refresh_right_after_start_does_not_open_second_connection(
     ec.refresh("main")
     assert ec.cache["main"]["online"] is True
     assert len(device.pairings) == 1
+
+
+# ------------------------------------------------- calls that run out of time
+
+def test_timed_out_call_returns_error_and_is_cancelled(connected, device):
+    # the thermostat takes longer than the caller is willing to wait
+    device.write_delay = 0.5
+    res = connected.set_temp("main", 75, timeout=0.1)
+    assert res["ok"] is False and "timed out" in res["error"]
+    # the write must not land later, after the caller was told it failed
+    time.sleep(0.8)
+    assert device.writes == []
+    assert connected.cache["main"]["target_temp"] == 72
+    # and the controller still works afterwards
+    device.write_delay = 0
+    assert connected.set_temp("main", 74) == {"ok": True}
+
+
+def test_timed_out_dump_returns_error(device, pair_folder, make_controller):
+    device.connect_delay = 0.5
+    ec = make_controller(pair_folder)
+    ec.start(connect=False)
+    res = ec.dump_characteristics("main", timeout=0.1)
+    assert res["ok"] is False and "timed out" in res["error"]
