@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import socket
 import sys
 
@@ -296,3 +297,125 @@ def test_main_passes_folder(monkeypatch, tmp_path):
                                       str(tmp_path)])
     p.main()
     assert seen == {"folder": str(tmp_path)}
+
+
+# ------------------------------------------------- keeping the keys safe
+
+posix_only = pytest.mark.skipif(sys.platform == "win32",
+                                reason="POSIX file permissions")
+
+
+@posix_only
+def test_saved_pairing_is_private(tmp_path, monkeypatch, scans, fake_pair):
+    monkeypatch.setattr(p.os, "umask", p.os.umask)   # (real umask 022)
+    scans.append([TARGET])
+    scripted_input(monkeypatch, ["main", "1", "", "", "", "12345678"])
+    asyncio.run(p.wizard(str(tmp_path)))
+    assert (tmp_path / "pair.json").stat().st_mode & 0o077 == 0
+    assert [f.name for f in tmp_path.iterdir()] == ["pair.json"]  # no temp
+
+
+@posix_only
+def test_default_folder_is_private(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(p.sys, "platform", "linux")
+    folder = p.get_app_folder()
+    assert oct(os.stat(folder).st_mode & 0o777) == "0o700"
+    os.chmod(folder, 0o755)                  # made by an older version
+    p.get_app_folder()
+    assert oct(os.stat(folder).st_mode & 0o777) == "0o700"
+
+
+@posix_only
+def test_custom_folder_permissions_left_alone(tmp_path):
+    folder = tmp_path / "myapp"
+    folder.mkdir(mode=0o755)
+    os.chmod(folder, 0o755)
+    p.get_app_folder(str(folder))
+    assert oct(os.stat(folder).st_mode & 0o777) == "0o755"
+
+
+def test_overwrite_replaces_file(tmp_path, monkeypatch, scans, fake_pair):
+    (tmp_path / "pair.json").write_text('{"old": true}')
+    scans.append([TARGET])
+    scripted_input(monkeypatch, ["main", "1", "", "", "pair.json", "y",
+                                 "12345678"])
+    asyncio.run(p.wizard(str(tmp_path)))
+    assert json.loads((tmp_path / "pair.json").read_text())[
+        "AccessoryPairingID"] == "AA"
+
+
+def test_failed_save_prints_the_keys(tmp_path, monkeypatch, scans,
+                                     fake_pair, capsys):
+    scans.append([TARGET])
+    scripted_input(monkeypatch, ["main", "1", "", "", "", "12345678"])
+
+    def disk_full(src, dst):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(p.os, "replace", disk_full)
+    asyncio.run(p.wizard(str(tmp_path)))
+    out = capsys.readouterr().out
+    assert "could not save" in out and "No space left" in out
+    assert '"AccessoryPairingID": "AA"' in out     # keys not lost
+    assert list(tmp_path.iterdir()) == []          # no half-written file
+
+
+@pytest.mark.parametrize("answers, saved_as", [
+    (["Main.JSON"], "Main.json"),
+    (["den"], "den.json"),
+    (["sub/x", "..\\x", ".hidden", "ok"], "ok.json"),   # asked again
+])
+def test_filename_checked_before_pairing(tmp_path, monkeypatch, scans,
+                                         fake_pair, capsys, answers,
+                                         saved_as):
+    scans.append([TARGET])
+    scripted_input(monkeypatch,
+                   ["main", "1", "", "", *answers, "12345678"])
+    asyncio.run(p.wizard(str(tmp_path)))
+    assert [f.name for f in tmp_path.iterdir()] == [saved_as]
+    if len(answers) > 1:
+        assert capsys.readouterr().out.count("just a file name") == 3
+
+
+@pytest.mark.parametrize("exc, code", [(EOFError, 1),
+                                       (KeyboardInterrupt, 130)])
+def test_quitting_at_a_prompt(tmp_path, monkeypatch, capsys, exc, code):
+    def quit_now(prompt=""):
+        raise exc
+    monkeypatch.setattr("builtins.input", quit_now)
+    monkeypatch.setattr(sys, "argv", ["ecobee-pair", "--folder",
+                                      str(tmp_path)])
+    with pytest.raises(SystemExit) as e:
+        p.main()
+    assert e.value.code == code
+    assert "aborted" in capsys.readouterr().out
+
+
+# ------------------------------------------------ odd mDNS / code input
+
+def test_listener_survives_bad_records():
+    zc = FakeZC({
+        "Bad Bytes._hap._tcp.local.": FakeInfo(
+            props={b"id": b"\xff\xfe", b"md": b"\xc3"}),
+        "No Id A._hap._tcp.local.": FakeInfo(props={b"md": b"x"}),
+        "No Id B._hap._tcp.local.": FakeInfo(props={}),
+    })
+    lst = p.HapListener()
+    for name in zc.infos:
+        lst.add_service(zc, "_hap._tcp.local.", name)
+    names = sorted(d["name"] for d in lst.devices.values())
+    assert names == ["Bad Bytes", "No Id A", "No Id B"]
+
+
+def test_listener_never_raises():
+    class Exploding:
+        def get_service_info(self, type_, name):
+            raise RuntimeError("zeroconf hiccup")
+    lst = p.HapListener()
+    lst.add_service(Exploding(), "_hap._tcp.local.", "X._hap._tcp.local.")
+    assert lst.devices == {}
+
+
+def test_normalize_code_ascii_digits_only():
+    assert p.normalize_code("²²²²²²²²") is None
+    assert p.normalize_code("１２３４５６７８") is None

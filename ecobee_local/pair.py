@@ -55,17 +55,65 @@ APP_NAME = "ecobee-local"
 
 
 def get_app_folder(app_folder=None):
-    """Return the per-user credentials folder, creating it if needed."""
+    """
+    Return the credentials folder, creating it if needed. New folders are
+    private to the current user (0700); the default ecobee-local folder is
+    also tightened if an older version created it world-readable. A folder
+    passed with --folder that already exists is left as it is (it may be
+    shared with another app); the pairing files themselves are always 0600.
+    """
     if app_folder:
-        os.makedirs(app_folder, exist_ok=True)
+        os.makedirs(app_folder, mode=0o700, exist_ok=True)
         return app_folder
     if sys.platform == "win32":
         base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
     else:
         base = os.path.expanduser("~")
     folder = os.path.join(base, APP_NAME)
-    os.makedirs(folder, exist_ok=True)
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    if sys.platform != "win32":
+        try:
+            os.chmod(folder, 0o700)
+        except OSError:
+            pass
     return folder
+
+
+def save_pairing(path, data):
+    """
+    Write pairing data readable only by the current user (0600), atomically:
+    a temp file in the same folder is renamed over the target, so a failed
+    write never leaves a truncated or half-written file behind.
+    """
+    tmp = f"{path}.tmp-{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def check_filename(name):
+    """
+    Return (filename, None) with the extension made a lowercase ".json"
+    (so ecobee-hub's *.json search finds it on every OS), or (None, why)
+    if it isn't a plain file name.
+    """
+    if any(sep in name for sep in ("/", "\\")) or name.startswith("."):
+        return None, ("that needs to be just a file name, like den.json "
+                      "(no folders, not starting with a dot)")
+    stem = name[:-5] if name.lower().endswith(".json") else name
+    if not stem:
+        return None, "that needs a name before .json"
+    return stem + ".json", None
 
 
 def next_auto_filename(folder):
@@ -93,7 +141,7 @@ def normalize_code(raw):
 
     Returns the dashed string, or None if it isn't exactly 8 digits.
     """
-    digits = "".join(c for c in raw if c.isdigit())
+    digits = "".join(c for c in raw if c in "0123456789")
     if len(digits) != 8:
         return None
     return f"{digits[0:3]}-{digits[3:5]}-{digits[5:8]}"
@@ -116,6 +164,15 @@ class HapListener:
         pass
 
     def add_service(self, zc, type_, name):
+        # called on zeroconf's browser thread: an exception here would stop
+        # the scan from seeing any device announced after this one, so a
+        # malformed record from some other device is just skipped
+        try:
+            self._add(zc, type_, name)
+        except Exception:
+            pass
+
+    def _add(self, zc, type_, name):
         if self.name_filter and self.name_filter not in name.lower():
             return
         info = zc.get_service_info(type_, name)
@@ -123,12 +180,12 @@ class HapListener:
             return
         ip = socket.inet_ntoa(info.addresses[0])
         port = info.port
-        props = {
-            (k.decode() if isinstance(k, bytes) else k):
-            (v.decode() if isinstance(v, bytes) else v)
-            for k, v in info.properties.items()
-        }
-        device_id = props.get("id", "00:00:00:00:00:00")
+
+        def text(b):
+            return b.decode("utf-8", "replace") if isinstance(b, bytes) else b
+        props = {text(k): text(v) for k, v in (info.properties or {}).items()}
+        # dedupe on device id (fall back to the service name if it has none)
+        device_id = props.get("id") or name
         # dedupe on device id; clean up the noisy mDNS suffix for display
         display = name.replace("._hap._tcp.local.", "")
         self.devices[device_id] = {
@@ -319,9 +376,12 @@ async def wizard(app_folder=None):
 
     # filename; default auto-numbers pair.json, pair1.json, ...
     auto_name = next_auto_filename(app_folder)
-    fn_in = input(f"Filename to save as [{auto_name}]: ").strip() or auto_name
-    if not fn_in.lower().endswith(".json"):
-        fn_in += ".json"
+    fn_in = None
+    while fn_in is None:
+        fn_in, problem = check_filename(
+            input(f"Filename to save as [{auto_name}]: ").strip() or auto_name)
+        if problem:
+            print(f"  {problem}; try again.")
     target_file = os.path.join(app_folder, fn_in)
     if os.path.exists(target_file):
         if input(f"  {fn_in} exists. Overwrite? [y/N]: ").strip().lower() != "y":
@@ -357,8 +417,20 @@ async def wizard(app_folder=None):
     pairing_data["_label"] = label
     pairing_data["_name"] = friendly
 
-    with open(target_file, "w") as f:
-        json.dump(pairing_data, f, indent=4)
+    try:
+        save_pairing(target_file, pairing_data)
+    except Exception as e:
+        # the thermostat is paired to these keys now; losing them would
+        # mean resetting HomeKit on it, so show them rather than drop them
+        print()
+        print(f"  ! could not save {target_file}: {type(e).__name__}: {e}")
+        print("  The thermostat IS paired. Save the text between the lines as")
+        print("  a .json file in your pairing folder yourself, and keep it")
+        print("  private (it contains the long-term pairing keys):")
+        print("-" * 60)
+        print(json.dumps(pairing_data, indent=4))
+        print("-" * 60)
+        return
 
     print()
     print(f"Saved '{friendly}' (label '{label}') to: {target_file}")
@@ -375,7 +447,14 @@ def main():
         help="where to save pairing files (default: per-user ecobee-local folder)",
     )
     cli = ap.parse_args()
-    asyncio.run(wizard(cli.folder))
+    try:
+        asyncio.run(wizard(cli.folder))
+    except KeyboardInterrupt:
+        print("\naborted.")
+        sys.exit(130)
+    except EOFError:
+        print("\naborted (no more input).")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
