@@ -885,3 +885,32 @@ def test_dump_failure_returns_error(device, pair_folder, make_controller,
     assert res["ok"] is False
     assert type(exc).__name__ in res["error"]
     assert device.pairings[0].closed
+
+
+# ------------------------------------------------------ comfort hold window
+
+def test_real_comfort_change_during_hold_is_kept(connected, device):
+    rec = Recorder()
+    connected.on_change(rec)
+    assert connected.set_comfort_mode("main", "away")["ok"]
+    # someone picks "sleep" at the wall within the hold window
+    device.values[COMFORT_READ] = 1
+    connected.refresh("main")
+    assert connected.get_comfort_mode("main") == "sleep"
+    assert rec.last()["comfort_mode"] == "sleep"
+
+
+def test_stale_comfort_readback_during_hold_is_ignored(connected, device):
+    assert connected.set_comfort_mode("main", "away")["ok"]
+    # the thermostat still reports the old profile (home) for a moment
+    connected.refresh("main")
+    assert connected.get_comfort_mode("main") == "away"
+
+
+def test_comfort_rechecked_when_hold_ends(connected, device):
+    connected._COMFORT_HOLD_SECONDS = 0.2
+    # the thermostat accepted the write but really stayed on "home"
+    assert connected.set_comfort_mode("main", "away")["ok"]
+    assert connected.get_comfort_mode("main") == "away"
+    assert wait_until(lambda: connected.get_comfort_mode("main") == "home",
+                      timeout=3)

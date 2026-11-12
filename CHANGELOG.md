@@ -35,6 +35,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - `stop(timeout=...)` with a short timeout could cut the shutdown off halfway, leaving connections open. The shutdown now always finishes; `stop()` just stops waiting for it after `timeout`.
 - Library calls raised exceptions on bad input instead of returning `{"ok": False, "error": ...}`: an unknown thermostat label (`KeyError`), or a value like `nan`, `inf`, `"abc"` or `None`. Some bad values were even sent: `set_temp(..., True)` wrote -17 °C and `set_mode(..., 2.7)` wrote 2. These now all return an error and send nothing. Numeric strings like `"72"` still work.
 - `dump_characteristics()` raised when the thermostat couldn't be reached; it now returns `{"ok": False, "error": ...}`.
+- For 12 seconds after `set_comfort_mode()`, every comfort reading from the thermostat was ignored, including a real change made at the wall in that time, and nothing re-checked it afterwards. Now only readings that still show the previous profile are ignored, and the thermostat is read again when the 12 seconds are up.
 - Stopping the controller while a thermostat was still connecting (or reconnecting) could leave a task running, so `stop()` took 2 extra seconds and Python printed "Task was destroyed but it is pending!" on exit.
 - `--dump` left a HomeKit connection open (and a socket leaking) when the thermostat didn't answer. The same leak was fixed for normal connections in 1.1.1.
 

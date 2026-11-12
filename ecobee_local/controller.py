@@ -269,6 +269,10 @@ class EcobeeController:
     MODE_COOL = 2
     MODE_AUTO = 3
 
+    # after set_comfort_mode, ignore read-backs that still show the previous
+    # profile for this long (some models report the old one for a moment)
+    _COMFORT_HOLD_SECONDS = 12.0
+
     # ecobee comfort profiles (vendor feature; Premium/Smart, not the 3 lite)
     COMFORT_HOME = "home"
     COMFORT_SLEEP = "sleep"
@@ -317,6 +321,9 @@ class EcobeeController:
         # read-backs are ignored so a just-set profile isn't clobbered by a
         # lagging read (see _apply_reading and _set_comfort).
         self._comfort_hold = {label: 0 for label in self.labels}
+        # the profile each thermostat reported before our last comfort write
+        # (None: unknown, so ignore every read-back during the hold)
+        self._comfort_before = {}
 
         self._state = {
             label: {"pairing": None, "ids": None, "sensors": None, "lock": None}
@@ -1046,9 +1053,23 @@ class EcobeeController:
         # (a known ecobee reporting lag), which would otherwise make the UI
         # flip back to the previous value. The optimistic value set in
         # _set_comfort wins until the device catches up.
+        # Only read-backs still showing the profile from BEFORE the write are
+        # ignored; anything else is a real change (e.g. made at the wall)
+        # and ends the hold.
         cid = main_ids.get("comfort_read")
-        hold_until = self._comfort_hold.get(label, 0)
-        if time.monotonic() < hold_until:
+        stale = False
+        if time.monotonic() < self._comfort_hold.get(label, 0):
+            before = self._comfort_before.get(label)
+            try:
+                now = int(readings[cid]["value"]) \
+                    if _has_value(readings, cid) else None
+            except _BAD_VALUE:
+                now = None
+            if before is None or now is None or now == before:
+                stale = True
+            else:
+                self._comfort_hold[label] = 0
+        if stale:
             pass  # keep the optimistic value; skip this read-back
         elif _has_value(readings, cid):
             raw = readings[cid]["value"]
@@ -1127,6 +1148,13 @@ class EcobeeController:
                 if self.debug:
                     print(f"[{label}] callback reschedule failed: {e}")
         return _cb
+
+    def _request_refresh(self, label):
+        """Runs on the loop: refresh label soon, unless one is queued."""
+        if self._stopping or label in self._push_pending:
+            return
+        self._push_pending.add(label)
+        self._start_push_refresh(label)
 
     def _start_push_refresh(self, label):
         """Runs on the loop: start (and track) one refresh for a push."""
@@ -1335,13 +1363,19 @@ class EcobeeController:
                 err = _write_error(result)
                 if err:
                     return {"ok": False, "error": err}
+                before = self.cache[label]["comfort_raw"]
                 # reflect immediately; the device will also push the new value
                 self.cache[label]["comfort_mode"] = _COMFORT_NAMES.get(
                     int(value), "hold")
                 self.cache[label]["comfort_raw"] = int(value)
                 # protect this optimistic value from lagging read-backs for a
-                # short window (some models report the old profile briefly)
-                self._comfort_hold[label] = time.monotonic() + 12.0
+                # short window (some models report the old profile briefly),
+                # then read the real value once the window is over
+                hold = self._COMFORT_HOLD_SECONDS
+                self._comfort_before[label] = before
+                self._comfort_hold[label] = time.monotonic() + hold
+                asyncio.get_running_loop().call_later(
+                    hold + 0.5, self._request_refresh, label)
                 return {"ok": True}
             except Exception as e:
                 return {"ok": False, "error": f"{type(e).__name__}: {e}"}
