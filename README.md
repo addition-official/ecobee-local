@@ -182,6 +182,17 @@ LICENSE               MIT
 
 Clone and `pip install .` to build exactly what's published to PyPI.
 
+## Running the tests
+
+The tests need no thermostat, MQTT broker or network:
+
+    pip install ".[mqtt]" pytest
+    pytest
+
+They also run on GitHub for every pull request and push to `main`.
+Releases are published to PyPI automatically when a GitHub release is made
+(see [CHANGELOG.md](CHANGELOG.md) for what changed in each version).
+
 ## A note on how this was built
 
 The hard part of this project, figuring out how to control an Ecobee locally

@@ -6,7 +6,8 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 
 ### Added
 - Optional MQTT bridge: `pip install "ecobee-local[mqtt]"`, then run `ecobee-mqtt`. Publishes each thermostat's state to `ecobee/<label>/...` and accepts commands on `ecobee/<label>/set/<thing>`.
-- Test suite (`pytest`) that runs without a thermostat, broker or network.
+- Test suite (`pytest`) that runs without a thermostat, broker or network, run by GitHub Actions on Python 3.10 and 3.15.
+- Releases are published to PyPI from GitHub Actions with trusted publishing. The sdist now includes the tests and this changelog.
 
 ### Fixed
 - If the thermostat couldn't read one value (it reports "busy" now and then), the whole thermostat went offline and reconnected on every poll. Now it stays online and that value keeps its last reading, or `--` if it has never been read.
