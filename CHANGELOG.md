@@ -26,6 +26,12 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - `ecobee-mqtt`: some bad commands raised an error inside the MQTT client, which could stop the bridge from receiving further commands: a thermostat label that doesn't exist (e.g. `ecobee/typo/set/target`), a number like `inf`, or any unexpected error while applying the command. These are now logged and ignored.
 - A command or refresh sent while the controller was still making its first connection could open a second connection and leak the first, or fail with "not connected". It now waits for the first connection.
 - A command that didn't finish within its `timeout` raised `TimeoutError` instead of returning `{"ok": False, "error": ...}` as documented, and the thermostat could still apply the change afterwards. It now returns the error and the change is cancelled.
+- A connection attempt that was cancelled (by `stop()`, or by a command that timed out) left that half-open connection running, using up one of the thermostat's few HomeKit connection slots. It's now closed.
+- After `stop()`, commands waited out their whole timeout (12 seconds by default) before failing. They now fail straight away with "controller not started".
+- Calling `start()` again after `stop()` on the same controller sent commands to the old, stopped loop, so they timed out.
+- A refresh triggered by a push update from the thermostat could reconnect after `stop()`. Bursts of push updates are now merged into one read instead of one read each.
+- If a `with` block was interrupted (e.g. Ctrl+C) while connecting, the controller was left running.
+- `stop(timeout=...)` with a short timeout could cut the shutdown off halfway, leaving connections open. The shutdown now always finishes; `stop()` just stops waiting for it after `timeout`.
 - Stopping the controller while a thermostat was still connecting (or reconnecting) could leave a task running, so `stop()` took 2 extra seconds and Python printed "Task was destroyed but it is pending!" on exit.
 - `--dump` left a HomeKit connection open (and a socket leaking) when the thermostat didn't answer. The same leak was fixed for normal connections in 1.1.1.
 

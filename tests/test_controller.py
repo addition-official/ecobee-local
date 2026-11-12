@@ -698,11 +698,12 @@ def test_stop_while_still_connecting_finishes_cleanly(device, pair_folder,
     ec = make_controller(pair_folder)
     ec.start()
     assert ec.wait_ready(timeout=0.1) is False
+    loop, task = ec._loop, ec._main_task
     ec.stop()
     # once the loop has stopped nothing can finish the task any more, so it
     # must already be done by then
-    assert wait_until(lambda: not ec._loop.is_running())
-    assert ec._main_task.done()
+    assert not loop.is_running()
+    assert task.done()
 
 
 @pytest.mark.skipif(
@@ -719,6 +720,96 @@ def test_stop_survives_a_swallowed_cancel(device, pair_folder,
     ec = make_controller(pair_folder)
     ec.start()
     assert ec.wait_ready(timeout=0.1) is False
+    loop, task = ec._loop, ec._main_task
     ec.stop()
-    assert wait_until(lambda: not ec._loop.is_running())
-    assert ec._main_task.done()
+    assert not loop.is_running()
+    assert task.done()
+
+
+# ------------------------------------------- lifecycle (start / stop / again)
+
+def test_stop_during_connect_closes_the_half_open_pairing(
+        device, pair_folder, make_controller):
+    device.connect_delay = 3
+    ec = make_controller(pair_folder)
+    ec.start()
+    assert wait_until(lambda: device.pairings)
+    ec.stop()
+    assert all(p.closed for p in device.pairings)
+
+
+def test_timed_out_reconnect_closes_its_pairing(connected, device):
+    device.read_exc = AccessoryDisconnectedError("dropped")
+    device.connect_delay = 2
+    res = connected.refresh("main", timeout=0.3)
+    assert res["ok"] is False and "timed out" in res["error"]
+    assert wait_until(lambda: all(p.closed for p in device.pairings))
+
+
+def test_commands_after_stop_fail_straight_away(connected, device):
+    connected.stop()
+    t0 = time.monotonic()
+    assert connected.set_temp("main", 70, timeout=3) == {
+        "ok": False, "error": "controller not started"}
+    assert connected.refresh("main", timeout=3)["ok"] is False
+    assert time.monotonic() - t0 < 0.5
+
+
+def test_restart_same_controller(connected, device):
+    for _ in range(8):
+        connected.stop()
+        connected.start()
+        # straight away, no wait_ready(): must go to the new loop
+        assert connected.set_mode("main", 2, timeout=3) == {"ok": True}
+    connected.stop()
+    assert all(p.closed for p in device.pairings)
+
+
+def test_push_refresh_does_not_reconnect_after_stop(connected, device):
+    device.read_exc = AccessoryDisconnectedError("dropped")
+    device.connect_delay = 0.3
+    device.pairings[0].callback({"event": 1})
+    connected.stop()
+    count = len(device.pairings)
+    time.sleep(0.6)
+    assert len(device.pairings) == count
+    assert all(p.closed for p in device.pairings)
+
+
+def test_push_events_are_merged(connected, device):
+    reads = device.reads
+    for _ in range(50):
+        device.pairings[0].callback({"event": 1})
+    time.sleep(0.3)
+    assert device.reads - reads <= 5
+
+
+def test_interrupted_with_block_still_stops(device, pair_folder,
+                                           monkeypatch):
+    ec = EcobeeController.from_folder(app_folder=str(pair_folder),
+                                      poll_interval=3600)
+
+    def interrupted(timeout=30.0):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(ec, "wait_ready", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        with ec:
+            pass
+    assert ec._started is False
+    assert wait_until(lambda: all(p.closed for p in device.pairings))
+
+
+def test_short_stop_timeout_still_closes_everything(device, pair_folder,
+                                                   make_controller):
+    # stop() returns after its timeout, but the shutdown it started still
+    # finishes in the background instead of being cut off
+    device.hang = True
+    ec = make_controller(pair_folder)
+    ec.start()
+    ec.wait_ready(timeout=0.1)
+    thread = ec._thread
+    t0 = time.monotonic()
+    ec.stop(timeout=0.01)
+    assert time.monotonic() - t0 < 1
+    assert wait_until(lambda: not thread.is_alive())
+    assert all(p.closed for p in device.pairings)

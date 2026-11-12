@@ -312,7 +312,13 @@ class EcobeeController:
 
         self._loop = None
         self._loop_thread = None
+        self._thread = None
         self._loop_ready = threading.Event()
+        self._stopping = False
+        # refreshes started by push events: tracked so stop() can cancel
+        # them, and merged so a burst of events causes one read, not fifty
+        self._push_tasks = set()
+        self._push_pending = set()
         # set once every thermostat has had its first connection attempt
         self._first_connect_done = threading.Event()
         self._started = False
@@ -384,9 +390,13 @@ class EcobeeController:
         if self._started:
             return
         self._started = True
+        self._stopping = False
         self._auto_connect = connect
         self._first_connect_done.clear()
-        threading.Thread(target=self._thread_main, daemon=True).start()
+        self._loop_ready.clear()
+        self._push_pending.clear()
+        self._thread = threading.Thread(target=self._thread_main, daemon=True)
+        self._thread.start()
         self._loop_ready.wait(timeout=wait_timeout)
 
     def __enter__(self):
@@ -395,8 +405,12 @@ class EcobeeController:
         Starts the controller and waits for the first connections (see
         wait_ready), and always stops it on the way out, even on an error.
         """
-        self.start()
-        self.wait_ready()
+        try:
+            self.start()
+            self.wait_ready()
+        except BaseException:      # e.g. Ctrl+C while waiting to connect
+            self.stop()
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -430,6 +444,10 @@ class EcobeeController:
         if self._on_loop_thread():
             raise RuntimeError(f"stop() {_CALLBACK_THREAD_ERROR}")
         loop = self._loop
+        # from here on, new commands fail straight away and nothing new
+        # (push refreshes, reconnects) gets started
+        self._started = False
+        self._stopping = True
 
         async def _shutdown():
             # cancel the background health loop so it isn't left pending when
@@ -447,6 +465,12 @@ class EcobeeController:
                     break
                 task.cancel()
                 await asyncio.wait({task}, timeout=0.5)
+            # refreshes started by push events
+            pushes = set(self._push_tasks)
+            for t in pushes:
+                t.cancel()
+            if pushes:
+                await asyncio.wait(pushes, timeout=1.0)
             for label in self.labels:
                 st = self._state.get(label, {})
                 pairing = st.get("pairing")
@@ -459,16 +483,33 @@ class EcobeeController:
                 self.cache[label]["online"] = False
                 self._notify(label)
 
+        # The loop stops itself once the shutdown has finished, never in the
+        # middle of it (that would leave connections open). stop() waits up
+        # to `timeout` for that; a slower shutdown completes in the
+        # background.
         try:
             fut = asyncio.run_coroutine_threadsafe(_shutdown(), loop)
-            fut.result(timeout=timeout)
+            fut.add_done_callback(
+                lambda _f: loop.call_soon_threadsafe(loop.stop))
         except Exception:
-            pass
-        try:
-            loop.call_soon_threadsafe(loop.stop)
-        except Exception:
-            pass
-        self._started = False
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                pass
+        # then release the loop, so a later start() gets a fresh one and
+        # stray calls fail fast
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=timeout)
+        if not loop.is_running():
+            try:
+                loop.close()
+            except Exception:
+                pass
+        self._loop = None
+        self._loop_thread = None
+        self._thread = None
+        self._main_task = None
 
     def on_change(self, callback):
         """
@@ -487,8 +528,10 @@ class EcobeeController:
         self._listeners.append(callback)
 
         def remove():
-            if callback in self._listeners:
+            try:
                 self._listeners.remove(callback)
+            except ValueError:
+                pass    # already removed
         return remove
 
     def _snapshot(self, label):
@@ -698,7 +741,7 @@ class EcobeeController:
     # ------------------------------------------------------------- internals
 
     def _run(self, coro, timeout=12.0):
-        if self._loop is None:
+        if self._loop is None or not self._started:
             coro.close()
             return {"ok": False, "error": "controller not started"}
         if self._on_loop_thread():
@@ -995,17 +1038,38 @@ class EcobeeController:
         def _cb(*args, **kwargs):
             if self.debug:
                 print(f"[{label}] event: args={args!r} kwargs={kwargs!r}")
+            loop = self._loop
+            if self._stopping or loop is None:
+                return
+            if label in self._push_pending:
+                return      # a refresh is already queued; it will see this
+            self._push_pending.add(label)
             try:
-                self._loop.call_soon_threadsafe(
-                    lambda: self._loop.create_task(self._refresh(label))
-                )
+                loop.call_soon_threadsafe(self._start_push_refresh, label)
             except Exception as e:
+                self._push_pending.discard(label)
                 if self.debug:
                     print(f"[{label}] callback reschedule failed: {e}")
         return _cb
 
+    def _start_push_refresh(self, label):
+        """Runs on the loop: start (and track) one refresh for a push."""
+        if self._stopping:
+            self._push_pending.discard(label)
+            return
+        task = self._loop.create_task(self._push_refresh(label))
+        self._push_tasks.add(task)
+        task.add_done_callback(self._push_tasks.discard)
+
+    async def _push_refresh(self, label):
+        # events arriving from now on need a new read, so queue another
+        self._push_pending.discard(label)
+        await self._refresh(label)
+
     @_notifies
     async def _connect(self, label):
+        if self._stopping:
+            return False
         path = self._pair_paths[label]
         if not os.path.exists(path):
             print(f"[{label}] pairing file missing: {path}")
@@ -1067,6 +1131,15 @@ class EcobeeController:
             self.cache[label]["online"] = False
             self._state[label]["pairing"] = None
             return False
+        except BaseException:
+            # cancelled (stop(), or a command that timed out): close the
+            # half-open pairing too, it was never stored anywhere
+            if pairing is not None:
+                try:
+                    await pairing.close()
+                except Exception:
+                    pass
+            raise
 
     @_notifies
     async def _refresh(self, label):

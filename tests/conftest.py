@@ -209,6 +209,7 @@ class FakeDevice:
                 # takes a few trips round the event loop
                 for _ in range(20):
                     await asyncio.sleep(0)
+                await asyncio.sleep(0.1)
                 if self.swallow_cancel:
                     self.hang = False
                     raise OSError("connection closed")
