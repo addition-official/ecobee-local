@@ -4,6 +4,8 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 
 ## Unreleased
 
+## 1.2.0
+
 ### Added
 - Optional MQTT bridge: `pip install "ecobee-local[mqtt]"`, then run `ecobee-mqtt`. Publishes each thermostat's state to `ecobee/<label>/...` and accepts commands on `ecobee/<label>/set/<thing>`.
 - Test suite (`pytest`) that runs without a thermostat, broker or network, run by GitHub Actions on Python 3.10 and 3.15.
