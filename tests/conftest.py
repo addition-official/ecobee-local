@@ -9,6 +9,7 @@ import asyncio
 import json
 import socket
 import time
+import types
 
 import pytest
 
@@ -58,7 +59,7 @@ def no_network(monkeypatch):
 class Char:
     def __init__(self, type_, iid, value=None, perms=("pr", "ev"),
                  description="", unit=None, minValue=None, maxValue=None,
-                 minStep=None):
+                 minStep=None, valid_values=None, valid_values_range=None):
         self.type = type_
         self.iid = iid
         self.value = value
@@ -68,6 +69,30 @@ class Char:
         self.minValue = minValue
         self.maxValue = maxValue
         self.minStep = minStep
+        self.valid_values = valid_values
+        self.valid_values_range = valid_values_range
+
+    def raw(self, value):
+        """This characteristic as the thermostat's /accessories JSON has it:
+        metadata keys only when the thermostat publishes them."""
+        d = {"type": self.type, "iid": self.iid, "perms": list(self.perms),
+             "value": value}
+        for key, attr in (("minValue", "minValue"), ("maxValue", "maxValue"),
+                          ("minStep", "minStep"), ("unit", "unit"),
+                          ("valid-values", "valid_values"),
+                          ("valid-values-range", "valid_values_range")):
+            if getattr(self, attr) is not None:
+                d[key] = getattr(self, attr)
+        if self.description:
+            d["description"] = self.description
+        return d
+
+
+def to_raw(accessories, values):
+    return [{"aid": acc.aid, "services": [
+        {"type": srv.type, "characteristics": [
+            ch.raw(values.get((acc.aid, ch.iid))) for ch in srv.characteristics]}
+        for srv in acc.services]} for acc in accessories]
 
 
 class Service:
@@ -82,7 +107,12 @@ class Accessory:
         self.services = services
 
 
-def build_accessories(comfort=True, humidity_target=False):
+ALL_MODES = [0, 1, 2, 3]
+
+
+def build_accessories(comfort=True, humidity_target=False,
+                      mode_values=ALL_MODES, mode_values_range=None,
+                      limits=True):
     """
     A realistic ecobee Premium-style tree: the thermostat accessory (with a
     vendor service and a vendor characteristic that share UUID prefixes with
@@ -97,12 +127,18 @@ def build_accessories(comfort=True, humidity_target=False):
         Char("00000011" + HAP, CURRENT_TEMP[1], unit="celsius",
              description="Current Temperature"),
         Char("35", TARGET_TEMP[1], perms=("pr", "pw", "ev"), unit="celsius",
-             minValue=7.0, maxValue=33.3, minStep=0.1,
+             minValue=7.0 if limits else None,
+             maxValue=33.3 if limits else None, minStep=0.1,
              description="Target Temperature"),      # short-form UUID
-        Char("00000033" + HAP, MODE[1], perms=("pr", "pw", "ev")),
+        Char("00000033" + HAP, MODE[1], perms=("pr", "pw", "ev"),
+             valid_values=mode_values, valid_values_range=mode_values_range),
         Char("0000000F" + HAP, RUNNING_STATE[1]),
-        Char("0000000D" + HAP, COOL_THRESHOLD[1], perms=("pr", "pw", "ev")),
-        Char("00000012" + HAP, HEAT_THRESHOLD[1], perms=("pr", "pw", "ev")),
+        Char("0000000D" + HAP, COOL_THRESHOLD[1], perms=("pr", "pw", "ev"),
+             minValue=18.0 if limits else None,
+             maxValue=33.3 if limits else None),
+        Char("00000012" + HAP, HEAT_THRESHOLD[1], perms=("pr", "pw", "ev"),
+             minValue=7.0 if limits else None,
+             maxValue=26.0 if limits else None),
         Char("00000010" + HAP, HUMIDITY[1]),
         Char("00000036" + HAP, DISPLAY_UNITS[1], perms=("pr", "pw", "ev")),
         Char("000000BF" + HAP, TARGET_FAN[1], perms=("pr", "pw", "ev")),
@@ -197,6 +233,13 @@ class FakeDevice:
         self.connect_delay = 0    # seconds before connecting succeeds/fails
         self.write_delay = 0      # seconds before a write is applied
         self.writes = []          # every (aid, iid, value) written
+        self.write_calls = []     # the list passed to each put
+        # minimum heat/cool gap in Celsius the thermostat enforces on a
+        # write, and what it does about it: "reject" or "move_cool"
+        self.min_gap = None
+        self.gap_behavior = "reject"
+        # what aiohomekit's connection remembers as the underlying error
+        self.last_connector_error = None
         self.pairings = []        # every FakePairing created for this device
         self.reads = 0
 
@@ -230,9 +273,14 @@ class FakePairing:
     async def list_accessories_and_characteristics(self):
         await self.device._maybe_hang()
         await asyncio.sleep(self.device.connect_delay)
+        self.connection = types.SimpleNamespace(
+            last_connector_error=self.device.last_connector_error)
         if self.device.connect_exc:
             raise self.device.connect_exc
         self.accessories = self.device.accessories
+        # like aiohomekit: the raw JSON exactly as the thermostat sent it
+        return json.loads(json.dumps(
+            to_raw(self.device.accessories, self.device.values)))
 
     async def get_characteristics(self, ids):
         await self.device._maybe_hang()
@@ -256,6 +304,25 @@ class FakePairing:
         # like aiohomekit: rejected writes come back as a status dict
         # (it does NOT raise), accepted ones are absent from the result
         result = {}
+        chars = list(chars)
+        self.device.write_calls.append(chars)
+        dev = self.device
+        if dev.min_gap is not None:
+            new = {(a, i): v for a, i, v in chars}
+            heat = new.get(HEAT_THRESHOLD, dev.values.get(HEAT_THRESHOLD))
+            cool = new.get(COOL_THRESHOLD, dev.values.get(COOL_THRESHOLD))
+            if cool - heat < dev.min_gap:
+                if dev.gap_behavior == "reject":
+                    for aid, iid, value in chars:
+                        dev.writes.append((aid, iid, value))
+                        result[(aid, iid)] = {
+                            "status": -70410,
+                            "description": "Value supplied is not valid."}
+                    return result
+                # "move_cool": accept, then push cool up to keep the gap
+                chars = [(a, i, v) for a, i, v in chars
+                         if (a, i) != COOL_THRESHOLD]
+                chars.append((*COOL_THRESHOLD, heat + dev.min_gap))
         for aid, iid, value in chars:
             self.device.writes.append((aid, iid, value))
             if (aid, iid) in self.device.write_errors:

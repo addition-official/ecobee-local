@@ -157,7 +157,7 @@ def test_print_dump_table(capsys):
     lines = capsys.readouterr().out.splitlines()
     assert lines[0].split() == ["AID", "IID", "DESCRIPTION", "TYPE", "(UUID)",
                                 "VALUE", "R", "W", "N", "UNIT", "MIN", "MAX",
-                                "STEP"]
+                                "STEP", "VALID"]
     assert set(lines[1]) == {"-"}
     assert lines[2].split()[:2] == ["1", "11"]
     assert " y  -  y " in lines[2]

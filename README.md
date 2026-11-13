@@ -79,6 +79,7 @@ ecobee-hub --label main --set-temp 72
 ecobee-hub --label main --set-temp-c 22.5             # Celsius (also --set-heat-c, --set-cool-c)
 ecobee-hub --label main --set-mode cool               # off/heat/cool/auto (or 0-3)
 ecobee-hub --label main --set-heat 68 --set-cool 75   # auto-mode range
+ecobee-hub --label main --set-range 68 75             # both thresholds in one request
 ecobee-hub --label main --set-fan on
 ecobee-hub --label main --set-comfort away            # home/sleep/away/hold (supported models)
 ecobee-hub --headless                                 # run as a background service (no GUI)
@@ -110,6 +111,7 @@ ec.set_temp_c("main", 22.5)                   # Celsius, exact half-degree
 ec.set_mode("main", EcobeeController.MODE_COOL)
 ec.set_heat_threshold("main", 68)             # auto mode
 ec.set_cool_threshold("main", 75)
+ec.set_range("main", 68, 75)                  # both at once (see below)
 ec.set_fan("main", auto=True)
 
 # comfort profiles (works on some models, not the ecobee3 lite; see notes)
@@ -146,6 +148,10 @@ Callbacks run on the controller's background thread: keep them quick, and don't 
 - In auto mode `target_temp` is `None`, because a single target is meaningless there - the thermostat runs off the heat/cool thresholds. Read `heat_threshold` / `cool_threshold` (or `display_target`) instead.
 - Temperatures are in Fahrenheit; the raw Celsius the device reports is also included as `*_c` (e.g. `target_temp_c`).
 - Fields a given model doesn't support read as `"--"` rather than a misleading `0`.
+- `modes` lists the modes this thermostat allows, in order, e.g. `["off", "heat", "cool"]` when Auto Heat/Cool is turned off on it. It comes from what the thermostat publishes over HomeKit and is re-read on every reconnect; if it publishes nothing, all four are listed. `None` until the first connection. `set_mode()` refuses a mode that isn't listed (`"auto mode is turned off on this thermostat"`).
+- `limits` holds the allowed `[min, max]` for `target`, `heat_threshold` and `cool_threshold` in Fahrenheit (`limits_c` in Celsius), as published by the thermostat; `None` where it publishes no range.
+- `offline_reason` says why a thermostat is offline: `"unpaired"` when it no longer accepts our pairing (HomeKit was reset on it, it was re-paired elsewhere, or the pairing file is missing or broken), so re-pairing is the fix; `"unreachable"` when it just doesn't answer (network, power). `None` while online, and before the first connection attempt.
+- `updated_at` is when the last reading arrived from that thermostat (epoch seconds, `None` before the first one), so you can spot stale data. A new reading with nothing else changed doesn't trigger `on_change`.
 
 ## How it works
 

@@ -64,6 +64,17 @@ import time
 
 from aiohomekit.controller import Controller
 from aiohomekit.controller.ip.pairing import IpPairing
+from aiohomekit.exceptions import (
+    AuthenticationError, IncorrectPairingIdError, InvalidAuthTagError,
+    InvalidSignatureError, UnpairedError,
+)
+
+# Errors that mean the thermostat no longer accepts our pairing keys (HomeKit
+# was reset on it, or it was re-paired elsewhere, which gives it a new device
+# id): re-pairing is the fix. Anything else while connecting means it simply
+# didn't answer (network, power).
+_PAIRING_ERRORS = (AuthenticationError, IncorrectPairingIdError,
+                   InvalidAuthTagError, InvalidSignatureError, UnpairedError)
 
 
 # HomeKit characteristic UUID prefixes for a thermostat service.
@@ -116,6 +127,75 @@ _TEMP_KEYS = ("current_temp", "target_temp", "cool_threshold", "heat_threshold")
 _INT_KEYS = ("mode", "running_state", "display_units", "target_fan",
              "current_fan", "target_humidity")
 
+# get_status()["limits"] keys -> the characteristic each one describes
+_LIMIT_KEYS = {"target": "target_temp", "heat_threshold": "heat_threshold",
+               "cool_threshold": "cool_threshold"}
+
+_MODE_ORDER = (0, 1, 2, 3)
+_MODE_LABELS = {0: "off", 1: "heat", 2: "cool", 3: "auto"}
+
+
+def _raw_metadata(raw):
+    """
+    {(aid, iid): characteristic dict} from the /accessories JSON exactly as
+    the thermostat sent it (what list_accessories_and_characteristics()
+    returns). Read metadata from here, not from aiohomekit's Characteristic
+    objects: those fill in generic HomeKit defaults (e.g. min/max) when the
+    thermostat publishes none, which would hide that it's missing.
+    """
+    meta = {}
+    for acc in raw or []:
+        for srv in acc.get("services", []):
+            for ch in srv.get("characteristics", []):
+                meta[(acc.get("aid"), ch.get("iid"))] = ch
+    return meta
+
+
+def _allowed_modes(meta, mode_id):
+    """Allowed mode names in order, from the mode characteristic's
+    valid-values (or valid-values-range); all four if it publishes none."""
+    ch = meta.get(mode_id) or {}
+    values = ch.get("valid-values")
+    rng = ch.get("valid-values-range")
+    if not values and isinstance(rng, list) and len(rng) == 2:
+        values = [v for v in _MODE_ORDER if rng[0] <= v <= rng[1]]
+    if not values:
+        return [_MODE_LABELS[v] for v in _MODE_ORDER]
+    return [_MODE_LABELS[v] for v in _MODE_ORDER if v in values]
+
+
+def _limits(meta, main_ids):
+    """({key: [min, max] in F}, {key: [min, max] in C}); None per key when
+    the thermostat doesn't publish both."""
+    f, c = {}, {}
+    for key, char in _LIMIT_KEYS.items():
+        ch = meta.get(main_ids.get(char)) or {}
+        lo, hi = ch.get("minValue"), ch.get("maxValue")
+        try:
+            c[key] = [float(lo), float(hi)]
+            f[key] = [_c_to_f(lo), _c_to_f(hi)]
+        except (TypeError, ValueError, OverflowError):
+            c[key] = f[key] = None
+    return f, c
+
+
+def _offline_reason(error, pairing=None):
+    """"unpaired" or "unreachable" for an error raised while connecting."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, _PAIRING_ERRORS):
+            return "unpaired"
+        error = error.__cause__ or error.__context__
+    # aiohomekit retries some failures in the background, so our own
+    # timeout can fire first; the underlying error is kept on the connection
+    last = getattr(getattr(pairing, "connection", None),
+                   "last_connector_error", None)
+    if isinstance(last, _PAIRING_ERRORS):
+        return "unpaired"
+    return "unreachable"
+
+
 # keys ecobee-pair adds that are metadata, not HomeKit credentials
 _META_KEYS = ("_label", "_name")
 
@@ -138,6 +218,11 @@ def _blank_cache():
     entry["comfort_mode"] = "--"   # home/sleep/away/hold, or -- if unsupported
     entry["comfort_raw"] = None
     entry["sensors"] = []  # list of remote-sensor dicts (Premium etc.)
+    entry["modes"] = None          # allowed mode names; None until connected
+    entry["limits"] = {k: None for k in _LIMIT_KEYS}      # [min, max] in F
+    entry["limits_c"] = {k: None for k in _LIMIT_KEYS}    # [min, max] in C
+    entry["offline_reason"] = None  # None, "unpaired" or "unreachable"
+    entry["updated_at"] = None      # epoch seconds of the last reading
     return entry
 
 
@@ -264,6 +349,10 @@ def _notifies(method):
     return wrapper
 
 
+def _without_time(status):
+    return {k: v for k, v in status.items() if k != "updated_at"}
+
+
 _CALLBACK_THREAD_ERROR = (
     "can't be called from an on_change callback (callbacks run on the "
     "controller's own thread); hand the work to another thread instead")
@@ -332,7 +421,8 @@ class EcobeeController:
         self._comfort_before = {}
 
         self._state = {
-            label: {"pairing": None, "ids": None, "sensors": None, "lock": None}
+            label: {"pairing": None, "ids": None, "sensors": None,
+                    "lock": None, "meta": {}}
             for label in self.labels
         }
 
@@ -410,7 +500,8 @@ class EcobeeController:
         self.cache[label] = _blank_cache()
         self._comfort_hold[label] = 0
         self._last_seen[label] = self._snapshot(label)
-        self._state[label] = {"pairing": None, "ids": None, "sensors": None, "lock": None}
+        self._state[label] = {"pairing": None, "ids": None, "sensors": None,
+                              "lock": None, "meta": {}}
         return label
 
     # ---------------------------------------------------------------- public
@@ -582,8 +673,9 @@ class EcobeeController:
         if label not in self.cache:
             return
         status = self._snapshot(label)
-        if status == self._last_seen.get(label):
-            return
+        last = self._last_seen.get(label)
+        if last is not None and _without_time(status) == _without_time(last):
+            return   # nothing changed but the reading's timestamp
         self._last_seen[label] = status
         for callback in list(self._listeners):
             try:
@@ -611,6 +703,21 @@ class EcobeeController:
                           target is meaningless there (the device drives off
                           the heat/cool thresholds instead). Use heat_threshold
                           and cool_threshold, or display_target, in auto.
+          modes         : the mode names this thermostat allows, in order,
+                          e.g. ["off", "heat", "cool"] when Auto Heat/Cool is
+                          turned off on it. Taken from the valid-values the
+                          thermostat publishes for its mode characteristic and
+                          re-read on every reconnect. If it publishes none,
+                          all four are listed. None until the first connect.
+          limits        : {"target", "heat_threshold", "cool_threshold"} ->
+                          [min, max] in F (limits_c: in C) as published by
+                          the thermostat; None where it publishes no range.
+          offline_reason: None while online (and before the first attempt);
+                          "unpaired" if the thermostat no longer accepts our
+                          pairing or the pairing file is missing/broken (fix:
+                          re-pair); "unreachable" if it just didn't answer.
+          updated_at    : epoch seconds of the last reading received from
+                          the thermostat, or None before the first one.
         """
         if label is None:
             return {lbl: self._status_for(lbl) for lbl in self.labels}
@@ -693,6 +800,11 @@ class EcobeeController:
             return {"ok": False,
                     "error": f"invalid mode {mode_int!r}: use 0-3 or "
                              f"off/heat/cool/auto"}
+        allowed = self.cache[label].get("modes")
+        if allowed is not None and _MODE_LABELS[mode] not in allowed:
+            return {"ok": False,
+                    "error": f"{_MODE_LABELS[mode]} mode is turned off on "
+                             f"this thermostat"}
         return self._run(self._set_mode(label, mode), timeout=timeout)
 
     def set_heat_threshold(self, label, temp_f, timeout=12.0):
@@ -710,6 +822,33 @@ class EcobeeController:
         """
         return self._set_temperature(label, "cool_threshold", temp_f, False,
                                      timeout)
+
+    def set_range(self, label, heat_f, cool_f, timeout=12.0):
+        """
+        Set both auto-mode thresholds (Fahrenheit) in one request, so the
+        thermostat never sees an in-between pair that's too close together.
+        heat_f must be below cool_f.
+
+        Returns {'ok': True, 'heat_threshold': F, 'cool_threshold': F} with
+        the values read back from the thermostat afterwards, which can
+        differ from what was asked: an Ecobee keeps a minimum gap between
+        the two (see the README for what it does when they're too close).
+        """
+        err = self._unknown(label)
+        if err:
+            return err
+        heat, err = _number(heat_f, "temperature")
+        if err:
+            return err
+        cool, err = _number(cool_f, "temperature")
+        if err:
+            return err
+        heat_c, cool_c = _f_to_c_half(heat), _f_to_c_half(cool)
+        if heat_c >= cool_c:
+            return {"ok": False,
+                    "error": f"heat ({heat_f}) must be below cool ({cool_f})"}
+        return self._run(self._set_range(label, heat_c, cool_c),
+                         timeout=timeout)
 
     def set_fan(self, label, auto, timeout=12.0):
         """
@@ -1141,6 +1280,8 @@ class EcobeeController:
             sensors.append(s)
         cache["sensors"] = sensors
         cache["online"] = True
+        cache["offline_reason"] = None
+        cache["updated_at"] = time.time()
 
     def _make_callback(self, label):
         # On any subscription event we simply re-poll the floor. The exact
@@ -1193,14 +1334,23 @@ class EcobeeController:
         if not os.path.exists(path):
             print(f"[{label}] pairing file missing: {path}")
             self.cache[label]["online"] = False
+            self.cache[label]["offline_reason"] = "unpaired"
             return False
         pairing = None
         try:
-            with open(path, "r") as f:
-                pdata = json.load(f)
+            try:
+                with open(path, "r") as f:
+                    pdata = json.load(f)
+            except ValueError as e:
+                # a broken pairing file: re-pairing is the fix
+                print(f"[{label}] connect failed: {type(e).__name__}: {e}")
+                self.cache[label]["online"] = False
+                self.cache[label]["offline_reason"] = "unpaired"
+                return False
             if not pdata:
                 print(f"[{label}] pairing file empty")
                 self.cache[label]["online"] = False
+                self.cache[label]["offline_reason"] = "unpaired"
                 return False
 
             # strip our metadata keys before handing creds to aiohomekit
@@ -1209,10 +1359,17 @@ class EcobeeController:
             controller = Controller()
             pairing = IpPairing(controller, creds)
 
-            await asyncio.wait_for(
+            raw = await asyncio.wait_for(
                 pairing.list_accessories_and_characteristics(), timeout=10.0
             )
             main_ids, sensor_specs = self._find_ids(pairing)
+            # allowed modes and setting ranges, re-read on every connect
+            # (e.g. Auto Heat/Cool can be switched off at the thermostat)
+            meta = _raw_metadata(raw)
+            self._state[label]["meta"] = meta
+            cache = self.cache[label]
+            cache["modes"] = _allowed_modes(meta, main_ids.get("mode"))
+            cache["limits"], cache["limits_c"] = _limits(meta, main_ids)
 
             want = self._wanted(main_ids, sensor_specs)
             readings = await asyncio.wait_for(
@@ -1248,6 +1405,7 @@ class EcobeeController:
                     pass
             print(f"[{label}] connect failed: {type(e).__name__}: {e}")
             self.cache[label]["online"] = False
+            self.cache[label]["offline_reason"] = _offline_reason(e, pairing)
             self._state[label]["pairing"] = None
             return False
         except BaseException:
@@ -1331,6 +1489,52 @@ class EcobeeController:
                 return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     @_notifies
+    async def _set_range(self, label, heat_c, cool_c):
+        st = self._state[label]
+        async with st["lock"]:
+            pairing = st["pairing"]
+            ids = st["ids"]
+            if pairing is None:
+                return {"ok": False, "error": "not connected"}
+            hid = (ids or {}).get("heat_threshold")
+            cid = (ids or {}).get("cool_threshold")
+            if not hid or not cid:
+                return {"ok": False, "error": "this thermostat does not "
+                        "expose 'heat_threshold' and 'cool_threshold'"}
+            try:
+                result = await asyncio.wait_for(
+                    pairing.put_characteristics(
+                        [(*hid, heat_c), (*cid, cool_c)]),
+                    timeout=8.0,
+                )
+                err = _write_error(result)
+                if err:
+                    return {"ok": False, "error": err}
+                # read back what the thermostat actually kept (it may move
+                # one threshold to keep its minimum gap)
+                try:
+                    readings = await asyncio.wait_for(
+                        pairing.get_characteristics([hid, cid]), timeout=8.0)
+                except Exception:
+                    readings = {}
+                cache = self.cache[label]
+                for key, char, sent in (("heat_threshold", hid, heat_c),
+                                        ("cool_threshold", cid, cool_c)):
+                    value = sent
+                    if _has_value(readings, char):
+                        value = readings[char]["value"]
+                    try:
+                        cache[key] = _c_to_f(value)
+                        cache[key + "_c"] = value
+                    except _BAD_VALUE:
+                        cache[key] = _c_to_f(sent)
+                        cache[key + "_c"] = sent
+                return {"ok": True, "heat_threshold": cache["heat_threshold"],
+                        "cool_threshold": cache["cool_threshold"]}
+            except Exception as e:
+                return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    @_notifies
     async def _set_int_char(self, label, key, value):
         """Write an integer-valued state characteristic."""
         st = self._state[label]
@@ -1399,6 +1603,7 @@ class EcobeeController:
         st = self._state[label]
         # dump can run before a persistent connection exists; make a temp one
         pairing = st["pairing"]
+        meta = st.get("meta") or {}
         temp_pairing = None
         if pairing is None:
             path = self._pair_paths[label]
@@ -1410,9 +1615,9 @@ class EcobeeController:
             controller = Controller()
             temp_pairing = IpPairing(controller, creds)
             try:
-                await asyncio.wait_for(
+                meta = _raw_metadata(await asyncio.wait_for(
                     temp_pairing.list_accessories_and_characteristics(), timeout=15.0
-                )
+                ))
             except BaseException as e:
                 try:
                     await temp_pairing.close()
@@ -1431,6 +1636,12 @@ class EcobeeController:
                     stype = getattr(srv, "type", "")
                     for ch in srv.characteristics:
                         perms = getattr(ch, "perms", []) or []
+                        # metadata as the thermostat published it (not
+                        # aiohomekit's filled-in defaults); None if absent
+                        m = meta.get((acc.aid, ch.iid)) or {}
+                        valid = m.get("valid-values")
+                        if valid is None and m.get("valid-values-range"):
+                            valid = "{}-{}".format(*m["valid-values-range"])
                         rows.append({
                             "aid": acc.aid,
                             "iid": ch.iid,
@@ -1441,10 +1652,11 @@ class EcobeeController:
                             "readable": "pr" in perms or "r" in perms,
                             "writable": "pw" in perms or "w" in perms,
                             "notifies": "ev" in perms,
-                            "unit": getattr(ch, "unit", None),
-                            "min": getattr(ch, "minValue", None),
-                            "max": getattr(ch, "maxValue", None),
-                            "step": getattr(ch, "minStep", None),
+                            "unit": m.get("unit", getattr(ch, "unit", None)),
+                            "min": m.get("minValue"),
+                            "max": m.get("maxValue"),
+                            "step": m.get("minStep"),
+                            "valid": valid,
                         })
         finally:
             if temp_pairing is not None:
@@ -1485,6 +1697,7 @@ def _print_dump(rows, truncate=True):
         ("type", "TYPE (UUID)"), ("value", "VALUE"),
         ("readable", "R"), ("writable", "W"), ("notifies", "N"),
         ("unit", "UNIT"), ("min", "MIN"), ("max", "MAX"), ("step", "STEP"),
+        ("valid", "VALID"),
     ]
 
     def cell(v):
@@ -1494,6 +1707,8 @@ def _print_dump(rows, truncate=True):
             return "-"
         if v is None:
             return ""
+        if isinstance(v, (list, tuple)):
+            v = ",".join(str(x) for x in v)
         s = str(v)
         if truncate and len(s) > 40:
             return s[:37] + "..."
@@ -1884,6 +2099,7 @@ def launch_gui(ec, poll_ms=2000):
         widgets[label] = {
             "cur": cur, "sub": sub, "tgt": tgt, "hum_val": hum_val,
             "mode_btns": mode_btns, "fan_btns": fan_btns,
+            "shown_modes": list(mode_btns),
             "comfort_btns": comfort_btns, "comfort_row": crow,
             "comfort_shown": True,
             "sensors": sensors_lbl, "status": status,
@@ -1921,6 +2137,18 @@ def launch_gui(ec, poll_ms=2000):
             tt = st.get("target_temp")
             ttc = st.get("target_temp_c")
             w["tgt"].config(text=fmt_temp(tt, ttc) if isinstance(tt, int) else "--")
+
+        # offer only the modes this thermostat allows (e.g. no Auto when
+        # Auto Heat/Cool is turned off on it); all of them until known
+        allowed = st.get("modes")
+        shown = [mv for mv in w["mode_btns"]
+                 if allowed is None or MODE_NAMES[mv].lower() in allowed]
+        if shown != w["shown_modes"]:
+            for b in w["mode_btns"].values():
+                b.pack_forget()
+            for mv in shown:
+                w["mode_btns"][mv].pack(side="left", padx=3)
+            w["shown_modes"] = shown
 
         # recolor mode buttons
         for mv, b in w["mode_btns"].items():
@@ -2132,7 +2360,7 @@ _MODE_NAMES = {"off": 0, "heat": 1, "cool": 2, "auto": 3}
 _WATCH_KEYS = ("online", "current_temp", "target_temp", "heat_threshold",
                "cool_threshold", "mode", "running_state", "target_fan",
                "current_fan", "humidity", "target_humidity", "comfort_mode",
-               "display_units")
+               "display_units", "offline_reason", "modes")
 _WATCH_SENSOR_KEYS = ("temperature", "occupancy", "motion", "battery",
                       "low_battery")
 
@@ -2220,6 +2448,11 @@ def main():
             help=f"set {what} in Celsius, 0.5 steps (requires --label)",
         )
     parser.add_argument(
+        "--set-range", type=int, nargs=2, default=None,
+        metavar=("HEAT", "COOL"),
+        help="set both auto-mode thresholds in F at once (requires --label)",
+    )
+    parser.add_argument(
         "--set-fan", choices=["auto", "on"], default=None,
         help="set fan to auto or on/continuous (requires --label)",
     )
@@ -2273,7 +2506,7 @@ def main():
         "--set-fan": args.set_fan, "--set-humidity": args.set_humidity,
         "--set-comfort": args.set_comfort,
         "--set-temp-c": args.set_temp_c, "--set-heat-c": args.set_heat_c,
-        "--set-cool-c": args.set_cool_c,
+        "--set-cool-c": args.set_cool_c, "--set-range": args.set_range,
     }
     requested = [flag for flag, value in actions.items() if value is not None]
     if requested and not args.label:
@@ -2353,6 +2586,8 @@ def main():
             report("set-heat-c", ec.set_heat_threshold_c(args.label, args.set_heat_c))
         if args.set_cool_c is not None:
             report("set-cool-c", ec.set_cool_threshold_c(args.label, args.set_cool_c))
+        if args.set_range is not None:
+            report("set-range", ec.set_range(args.label, *args.set_range))
         if args.set_fan is not None:
             report("set-fan", ec.set_fan(args.label, args.set_fan == "auto"))
         if args.set_humidity is not None:
