@@ -11,6 +11,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
   - `offline_reason`: `"unpaired"` (re-pair it) or `"unreachable"` (network, power), `None` while online.
   - `updated_at`: when the last reading arrived (epoch seconds).
 - `set_mode()` refuses a mode the thermostat doesn't allow, with e.g. `"auto mode is turned off on this thermostat"`, instead of sending it.
+- Choose the allowed modes yourself, per thermostat: `EcobeeController(..., modes={"main": ["off", "heat", "cool"]})` or `"_modes": [...]` in the pairing file (the constructor wins if both are set). Needed on Ecobees, which don't report Auto Heat/Cool over HomeKit. `get_status()["modes"]`, `set_mode()`, `--status` and the control window follow it, and `ecobee-pair` keeps `"_modes"` when re-pairing over the same file.
 - `set_range(label, heat, cool)` and `ecobee-hub --set-range HEAT COOL` set both auto-mode thresholds in one request, and return what the thermostat actually kept. Ecobees accept any gap over HomeKit (tested down to 0.5°C in auto mode).
 - `--status` shows the new fields, `--watch` reports changes to `modes` and `offline_reason`, `--dump` has a VALID column, and the control window only offers the modes the thermostat allows.
 

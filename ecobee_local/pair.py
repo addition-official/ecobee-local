@@ -383,10 +383,19 @@ async def wizard(app_folder=None):
         if problem:
             print(f"  {problem}; try again.")
     target_file = os.path.join(app_folder, fn_in)
+    keep_modes = None
     if os.path.exists(target_file):
         if input(f"  {fn_in} exists. Overwrite? [y/N]: ").strip().lower() != "y":
             print("Aborting so the existing file is not clobbered.")
             return
+        # re-pairing the same thermostat: keep its "_modes" setting
+        try:
+            with open(target_file, "r") as f:
+                old = json.load(f)
+            if isinstance(old, dict) and "_modes" in old:
+                keep_modes = old["_modes"]
+        except Exception:
+            pass
 
     print()
     print("On the thermostat, open the HomeKit pairing screen so the setup")
@@ -416,6 +425,8 @@ async def wizard(app_folder=None):
     # attach metadata the controller reads
     pairing_data["_label"] = label
     pairing_data["_name"] = friendly
+    if keep_modes is not None:
+        pairing_data["_modes"] = keep_modes
 
     try:
         save_pairing(target_file, pairing_data)

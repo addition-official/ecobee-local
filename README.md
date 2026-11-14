@@ -148,7 +148,28 @@ Callbacks run on the controller's background thread: keep them quick, and don't 
 - In auto mode `target_temp` is `None`, because a single target is meaningless there - the thermostat runs off the heat/cool thresholds. Read `heat_threshold` / `cool_threshold` (or `display_target`) instead.
 - Temperatures are in Fahrenheit; the raw Celsius the device reports is also included as `*_c` (e.g. `target_temp_c`).
 - Fields a given model doesn't support read as `"--"` rather than a misleading `0`.
-- `modes` lists the modes the thermostat says it allows over HomeKit, in order, e.g. `["off", "heat", "cool"]` from a thermostat that publishes no auto. It's re-read on every reconnect; if the thermostat publishes nothing, all four are listed. `None` until the first connection. `set_mode()` refuses a mode that isn't listed (`"auto mode is turned off on this thermostat"`). Tested on real Ecobees: they publish all four modes whether or not Auto Heat/Cool is enabled on the thermostat, and they accept auto over HomeKit even when it's disabled, so on an Ecobee `modes` is always all four and doesn't reflect that setting.
+- `modes` lists the modes the thermostat says it allows over HomeKit, in order, e.g. `["off", "heat", "cool"]` from a thermostat that publishes no auto. It's re-read on every reconnect; if the thermostat publishes nothing, all four are listed. `None` until the first connection. `set_mode()` refuses a mode that isn't listed (`"auto mode is turned off on this thermostat"`). Tested on real Ecobees: they publish all four modes whether or not Auto Heat/Cool is enabled on the thermostat, and they accept auto over HomeKit even when it's disabled, so on an Ecobee `modes` is always all four and doesn't reflect that setting. To fix that, tell the library which modes to allow yourself (next section).
+
+### Choosing which modes are allowed
+
+Because an Ecobee doesn't report its Auto Heat/Cool setting over HomeKit (and accepts auto anyway), you can declare the allowed modes per thermostat. `get_status()["modes"]`, `set_mode()` (which then refuses the others), `--status` and the control window all follow it. Either pass them to the constructor:
+
+```python
+ec = EcobeeController(
+    pair_files={"main": "pair.json", "up": "pair1.json"},
+    modes={"main": ["off", "heat", "cool"]},   # no auto on this one
+)
+```
+
+(`from_folder(..., modes={...})` takes the same argument.) Or add a `"_modes"` key to that thermostat's pairing file, next to `"_label"` and `"_name"`:
+
+```json
+"_modes": ["off", "heat", "cool"]
+```
+
+If both are set, the constructor wins. Without either, the thermostat's own HomeKit list is used, and if the thermostat publishes a narrower list than yours, only modes in both are allowed. An unknown mode name or label in `modes=` raises `ValueError`; an invalid `"_modes"` in a file is ignored with a warning.
+
+**Re-pairing caveat:** `"_modes"` lives in the pairing file, so anything that rewrites that file when a thermostat is re-paired can silently drop it. `ecobee-pair` keeps it when you re-pair over the same file, but other tools may not. If your own program rewrites pairing files, pass `modes=` to the constructor instead.
 - `limits` holds the allowed `[min, max]` for `target`, `heat_threshold` and `cool_threshold` in Fahrenheit (`limits_c` in Celsius), as published by the thermostat; `None` where it publishes no range.
 - `offline_reason` says why a thermostat is offline: `"unpaired"` when it no longer accepts our pairing (HomeKit was reset on it, it was re-paired elsewhere, or the pairing file is missing or broken), so re-pairing is the fix; `"unreachable"` when it just doesn't answer (network, power). `None` while online, and before the first connection attempt.
 - `updated_at` is when the last reading arrived from that thermostat (epoch seconds, `None` before the first one), so you can spot stale data. A new reading with nothing else changed doesn't trigger `on_change`.

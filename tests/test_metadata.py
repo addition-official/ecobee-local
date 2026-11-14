@@ -338,6 +338,9 @@ def _shown_mode_buttons(monkeypatch, ec):
         root.destroy()
     monkeypatch.setattr(tk.Tk, "mainloop", run_briefly)
     c.launch_gui(ec, poll_ms=50)
+    # free the window's Tcl objects here, on the thread that made them
+    import gc
+    gc.collect()
     return set(shown)
 
 
@@ -352,3 +355,103 @@ def test_gui_offers_all_modes_when_allowed(device, pair_folder,
     ec = connect(device, pair_folder, make_controller)
     assert _shown_mode_buttons(monkeypatch, ec) == {"Heat", "Cool", "Auto",
                                                     "Off"}
+
+
+# ------------------------------------------------- modes set by the user
+
+def make_with_modes(pair_folder, make_controller, **kwargs):
+    ec = make_controller(pair_folder, **kwargs)
+    ec.start()
+    assert ec.wait_ready(timeout=5)
+    return ec
+
+
+def test_constructor_modes(device, pair_folder, make_controller):
+    ec = make_controller(pair_folder, modes={"main": ["cool", "off", "heat"]})
+    # known straight away, in the usual order
+    assert ec.get_status("main")["modes"] == ["off", "heat", "cool"]
+    ec.start()
+    assert ec.wait_ready(timeout=5)
+    # the Ecobee publishes all four; the configured list still wins
+    assert ec.get_status("main")["modes"] == ["off", "heat", "cool"]
+    assert ec.set_mode("main", "auto") == {
+        "ok": False, "error": "auto mode is turned off on this thermostat"}
+    assert device.writes == []
+    assert ec.set_mode("main", "heat") == {"ok": True}
+
+
+def test_file_modes(device, tmp_path, make_controller):
+    write_pair_file(tmp_path, _modes=["off", "cool"])
+    ec = make_with_modes(tmp_path, make_controller)
+    assert ec.get_status("main")["modes"] == ["off", "cool"]
+    assert ec.set_mode("main", "heat")["error"] == \
+        "heat mode is turned off on this thermostat"
+    # never handed to aiohomekit as a credential
+    assert "_modes" not in device.pairings[0].creds
+
+
+def test_constructor_modes_win_over_file(device, tmp_path, make_controller):
+    write_pair_file(tmp_path, _modes=["off", "cool"])
+    ec = make_with_modes(tmp_path, make_controller,
+                         modes={"main": ["off", "heat", "cool", "auto"]})
+    assert ec.get_status("main")["modes"] == ["off", "heat", "cool", "auto"]
+
+
+def test_configured_modes_limited_to_what_thermostat_has(
+        device, pair_folder, make_controller):
+    device.accessories = build_accessories(mode_values=[0, 1])  # heat only
+    ec = make_with_modes(pair_folder, make_controller,
+                         modes={"main": ["off", "heat", "cool"]})
+    assert ec.get_status("main")["modes"] == ["off", "heat"]
+
+
+@pytest.mark.parametrize("modes, message", [
+    ({"main": ["off", "warm"]}, "unknown mode 'warm'"),
+    ({"main": []}, "at least one mode"),
+    ({"main": "heat"}, "list of mode names"),
+    ({"nope": ["off"]}, "unknown thermostat 'nope'"),
+])
+def test_bad_constructor_modes(pair_folder, modes, message):
+    with pytest.raises(ValueError, match=message):
+        EcobeeController.from_folder(app_folder=str(pair_folder), modes=modes)
+
+
+@pytest.mark.parametrize("bad", [["off", "warm"], [], "heat", {"x": 1}, 5])
+def test_bad_file_modes_are_ignored_with_a_warning(device, tmp_path,
+                                                   make_controller, capsys,
+                                                   bad):
+    write_pair_file(tmp_path, _modes=bad)
+    ec = make_with_modes(tmp_path, make_controller)
+    assert ec.get_status("main")["modes"] == ["off", "heat", "cool", "auto"]
+    assert "_modes" in capsys.readouterr().err
+
+
+def test_add_thermostat_with_modes(device, tmp_path):
+    write_pair_file(tmp_path, "up.json", label="up")
+    ec = EcobeeController(app_folder=str(tmp_path))
+    ec.add_thermostat("up.json", modes=["off", "cool"])
+    assert ec.get_status("up")["modes"] == ["off", "cool"]
+    with pytest.raises(ValueError):
+        ec.add_thermostat("up.json", label="up2", modes=["boost"])
+
+
+def test_cli_follows_file_modes(device, tmp_path, monkeypatch, capsys):
+    import sys
+    import ecobee_local.controller as c
+    write_pair_file(tmp_path, _modes=["off", "heat", "cool"])
+    monkeypatch.setattr(sys, "argv", ["ecobee-hub", "--folder", str(tmp_path),
+                                      "--label", "main", "--set-mode", "auto"])
+    with pytest.raises(SystemExit) as exc:
+        c.main()
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "auto mode is turned off on this thermostat" in out
+    assert "'modes': ['off', 'heat', 'cool']" in out
+    assert device.writes == []
+
+
+def test_gui_follows_configured_modes(device, pair_folder, make_controller,
+                                      monkeypatch):
+    ec = make_with_modes(pair_folder, make_controller,
+                         modes={"main": ["off", "cool"]})
+    assert _shown_mode_buttons(monkeypatch, ec) == {"Cool", "Off"}

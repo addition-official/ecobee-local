@@ -197,7 +197,44 @@ def _offline_reason(error, pairing=None):
 
 
 # keys ecobee-pair adds that are metadata, not HomeKit credentials
-_META_KEYS = ("_label", "_name")
+_META_KEYS = ("_label", "_name", "_modes")
+
+
+def _check_modes(modes):
+    """
+    The allowed modes a user configured, as names in the usual order, or
+    raise ValueError explaining what's wrong.
+    """
+    if not isinstance(modes, (list, tuple)):
+        raise ValueError(f"modes must be a list of mode names "
+                         f"(off/heat/cool/auto), not {modes!r}")
+    if not modes:
+        raise ValueError("modes needs at least one mode")
+    names = []
+    for m in modes:
+        key = m.strip().lower() if isinstance(m, str) else m
+        if key not in _MODE_LABELS.values():
+            raise ValueError(f"unknown mode {m!r}: use off, heat, cool or auto")
+        names.append(key)
+    return [n for n in _MODE_LABELS.values() if n in names]
+
+
+def _read_file_modes(path):
+    """The "_modes" list from a pairing file, or None (missing or invalid;
+    an invalid one is reported on stderr and ignored)."""
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict) or "_modes" not in data:
+        return None
+    try:
+        return _check_modes(data["_modes"])
+    except ValueError as e:
+        print(f"[ecobee-local] warning: ignoring \"_modes\" in "
+              f"{os.path.basename(path)}: {e}", file=sys.stderr)
+        return None
 
 
 def _blank_cache():
@@ -375,7 +412,7 @@ class EcobeeController:
     COMFORT_HOLD = "hold"
 
     def __init__(self, pair_files=None, app_folder=None, poll_interval=30.0,
-                 names=None, debug=False, comfort_warning=True):
+                 names=None, debug=False, comfort_warning=True, modes=None):
         """
         pair_files: dict of {label: filename_or_path}. Bare filenames are
                     resolved inside app_folder; absolute paths used as-is.
@@ -390,6 +427,15 @@ class EcobeeController:
                used, print a one-time note to stderr that comfort control
                depends on the thermostat's firmware and may not work on every
                model. Set False to silence it.
+        modes: optional {label: ["off", "heat", "cool", ...]}: the modes each
+               thermostat may be set to. get_status()["modes"], set_mode()
+               and the GUI follow it. Use it when HomeKit doesn't tell (an
+               Ecobee always reports all four, even with Auto Heat/Cool off)
+               or to restrict what this program can choose. Takes precedence
+               over a "_modes" list in the pairing file; without either, the
+               thermostat's own HomeKit list is used. If the thermostat
+               publishes a narrower list, only modes in both are allowed.
+               Raises ValueError for unknown labels or mode names.
         """
         self.app_folder = app_folder or default_app_folder()
         self.poll_interval = poll_interval
@@ -410,7 +456,26 @@ class EcobeeController:
 
         self.labels = list(self._pair_paths.keys())
 
+        # user-configured allowed modes: constructor first, then the file
+        modes = modes or {}
+        if not isinstance(modes, dict):
+            raise ValueError("modes must be a dict of {label: [mode names]}")
+        unknown = [label for label in modes if label not in self._pair_paths]
+        if unknown:
+            raise ValueError(f"modes: unknown thermostat {unknown[0]!r} "
+                             f"(have: {', '.join(self.labels) or 'none'})")
+        self._configured_modes = {}
+        for label, path in self._pair_paths.items():
+            if label in modes:
+                self._configured_modes[label] = _check_modes(modes[label])
+            else:
+                from_file = _read_file_modes(path)
+                if from_file is not None:
+                    self._configured_modes[label] = from_file
+
         self.cache = {label: _blank_cache() for label in self.labels}
+        for label, allowed in self._configured_modes.items():
+            self.cache[label]["modes"] = list(allowed)
 
         # per-label monotonic timestamp: until this time, device comfort
         # read-backs are ignored so a just-set profile isn't clobbered by a
@@ -481,10 +546,11 @@ class EcobeeController:
             pair_files[label] = path
         return cls(pair_files, app_folder=folder, **kwargs)
 
-    def add_thermostat(self, filename, label=None, name=None):
+    def add_thermostat(self, filename, label=None, name=None, modes=None):
         """
         Register one more pairing file after construction (before start()).
-        Returns the label used.
+        modes: optional list of allowed mode names (see __init__); else the
+        file's "_modes", if any. Returns the label used.
         """
         if self._started:
             raise RuntimeError("add_thermostat must be called before start()")
@@ -494,10 +560,15 @@ class EcobeeController:
         label = label or file_label
         if label in self._pair_paths:
             raise ValueError(f"label '{label}' already registered")
+        configured = _check_modes(modes) if modes is not None \
+            else _read_file_modes(path)
         self._pair_paths[label] = path
         self._names[label] = name or file_name
         self.labels.append(label)
         self.cache[label] = _blank_cache()
+        if configured is not None:
+            self._configured_modes[label] = configured
+            self.cache[label]["modes"] = list(configured)
         self._comfort_hold[label] = 0
         self._last_seen[label] = self._snapshot(label)
         self._state[label] = {"pairing": None, "ids": None, "sensors": None,
@@ -1371,7 +1442,10 @@ class EcobeeController:
             meta = _raw_metadata(raw)
             self._state[label]["meta"] = meta
             cache = self.cache[label]
-            cache["modes"] = _allowed_modes(meta, main_ids.get("mode"))
+            published = _allowed_modes(meta, main_ids.get("mode"))
+            configured = self._configured_modes.get(label)
+            cache["modes"] = published if configured is None else [
+                m for m in configured if m in published]
             cache["limits"], cache["limits_c"] = _limits(meta, main_ids)
 
             want = self._wanted(main_ids, sensor_specs)

@@ -419,3 +419,15 @@ def test_listener_never_raises():
 def test_normalize_code_ascii_digits_only():
     assert p.normalize_code("²²²²²²²²") is None
     assert p.normalize_code("１２３４５６７８") is None
+
+
+def test_repairing_keeps_modes(tmp_path, monkeypatch, scans, fake_pair):
+    (tmp_path / "pair.json").write_text(
+        '{"AccessoryPairingID": "OLD", "_modes": ["off", "cool"]}')
+    scans.append([TARGET])
+    scripted_input(monkeypatch, ["main", "1", "", "", "pair.json", "y",
+                                 "12345678"])
+    asyncio.run(p.wizard(str(tmp_path)))
+    saved = json.loads((tmp_path / "pair.json").read_text())
+    assert saved["AccessoryPairingID"] == "AA"        # new keys
+    assert saved["_modes"] == ["off", "cool"]         # setting kept
