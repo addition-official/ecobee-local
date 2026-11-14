@@ -16,6 +16,8 @@ It does two things continuously:
          ecobee/<label>/fan              -> auto           (auto/on)
          ecobee/<label>/comfort          -> home           (home/sleep/away/hold)
          ecobee/<label>/online           -> true
+         ecobee/<label>/offline_reason   -> none           (unpaired/unreachable)
+         ecobee/<label>/modes            -> off,heat,cool  (allowed modes)
      plus a JSON blob of everything at:
          ecobee/<label>/state            -> {...}
 
@@ -83,6 +85,11 @@ def build_state_payloads(prefix, label, st):
 
     online = st.get("online")
     pub("online", "true" if online else "false")
+    # why it's offline: "unpaired" (re-pair it), "unreachable", or "none"
+    pub("offline_reason", st.get("offline_reason") or "none")
+    modes = st.get("modes")
+    if modes:
+        pub("modes", ",".join(modes))   # e.g. off,heat,cool
 
     ct = st.get("current_temp")
     if isinstance(ct, int):

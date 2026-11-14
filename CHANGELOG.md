@@ -16,6 +16,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - Choose the allowed modes yourself, per thermostat: `EcobeeController(..., modes={"main": ["off", "heat", "cool"]})` or `"_modes": [...]` in the pairing file (the constructor wins if both are set). Needed on Ecobees, which don't report Auto Heat/Cool over HomeKit. `get_status()["modes"]`, `set_mode()`, `--status` and the control window follow it, and `ecobee-pair` keeps `"_modes"` when re-pairing over the same file.
 - `set_range(label, heat, cool)` and `ecobee-hub --set-range HEAT COOL` set both auto-mode thresholds in one request, and return what the thermostat actually kept. Ecobees accept any gap over HomeKit (tested down to 0.5°C in auto mode).
 - `--status` shows the new fields, `--watch` reports changes to `modes` and `offline_reason`, `--dump` has a VALID column, and the control window only offers the modes the thermostat allows.
+- `ecobee-mqtt` publishes `ecobee/<label>/offline_reason` (`none`, `unpaired` or `unreachable`) and `ecobee/<label>/modes` (e.g. `off,heat,cool`), so simple MQTT tools can react, e.g. to a thermostat that needs re-pairing.
 
 ### Fixed
 - `--dump` could show generic HomeKit default MIN/MAX values that the thermostat never published (filled in by aiohomekit). It now shows only what the thermostat itself publishes.

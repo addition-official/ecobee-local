@@ -61,6 +61,7 @@ def test_state_payloads():
     assert out.pop("ecobee/main/state") == json.dumps(STATUS)
     assert out == {
         "ecobee/main/online": "true",
+        "ecobee/main/offline_reason": "none",
         "ecobee/main/temperature": "71",
         "ecobee/main/target": "72",
         "ecobee/main/mode": "cool",
@@ -78,7 +79,8 @@ def test_state_payloads_before_first_read():
              "comfort_mode": "--", "heat_threshold": "--",
              "cool_threshold": "--"}
     topics = [t for t, _ in m.build_state_payloads("home/hvac", "up", blank)]
-    assert topics == ["home/hvac/up/online", "home/hvac/up/state"]
+    assert topics == ["home/hvac/up/online", "home/hvac/up/offline_reason",
+                      "home/hvac/up/state"]
     assert dict(m.build_state_payloads("x", "up", blank))["x/up/online"] == "false"
 
 
@@ -416,3 +418,38 @@ def test_password_option_wins_over_environment(bridge, monkeypatch):
     monkeypatch.setenv("ECOBEE_MQTT_PASSWORD", "from-env")
     run("--username", "u", "--password", "typed")
     assert client.auth == ("u", "typed")
+
+
+# -------------------------------------------- 1.3.0: offline_reason, modes
+
+@pytest.mark.parametrize("reason, payload", [
+    (None, "none"), ("unpaired", "unpaired"), ("unreachable", "unreachable"),
+])
+def test_offline_reason_topic(reason, payload):
+    st = dict(STATUS, online=reason is None, offline_reason=reason)
+    out = dict(m.build_state_payloads("ecobee", "main", st))
+    assert out["ecobee/main/offline_reason"] == payload
+
+
+@pytest.mark.parametrize("modes, payload", [
+    (["off", "heat", "cool"], "off,heat,cool"),
+    (["off", "heat", "cool", "auto"], "off,heat,cool,auto"),
+])
+def test_modes_topic(modes, payload):
+    out = dict(m.build_state_payloads("ecobee", "main",
+                                      dict(STATUS, modes=modes)))
+    assert out["ecobee/main/modes"] == payload
+
+
+def test_modes_topic_skipped_until_known():
+    topics = [t for t, _ in m.build_state_payloads(
+        "ecobee", "main", dict(STATUS, modes=None))]
+    assert "ecobee/main/modes" not in topics
+
+
+def test_bridge_publishes_new_topics_from_real_controller(connected, device):
+    # the controller's real get_status() feeds the topics
+    out = dict(m.build_state_payloads("ecobee", "main",
+                                      connected.get_status("main")))
+    assert out["ecobee/main/offline_reason"] == "none"
+    assert out["ecobee/main/modes"] == "off,heat,cool,auto"

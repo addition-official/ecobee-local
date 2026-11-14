@@ -212,7 +212,10 @@ Run it:
 `python -m ecobee_local.mqtt`.)
 
 It publishes state to `ecobee/<label>/<field>` (temperature, target, mode,
-humidity, fan, comfort, plus a full JSON blob at `ecobee/<label>/state`) and
+humidity, fan, comfort, plus a full JSON blob at `ecobee/<label>/state`),
+`ecobee/<label>/offline_reason` (`none`, or `unpaired` when the thermostat
+needs re-pairing, or `unreachable`) and `ecobee/<label>/modes` (the allowed
+modes, e.g. `off,heat,cool`), and
 listens for commands on `ecobee/<label>/set/<thing>`:
 
     ecobee/<label>/set/target     72        (Fahrenheit)
