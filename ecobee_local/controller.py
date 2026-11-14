@@ -704,11 +704,13 @@ class EcobeeController:
                           the heat/cool thresholds instead). Use heat_threshold
                           and cool_threshold, or display_target, in auto.
           modes         : the mode names this thermostat allows, in order,
-                          e.g. ["off", "heat", "cool"] when Auto Heat/Cool is
-                          turned off on it. Taken from the valid-values the
-                          thermostat publishes for its mode characteristic and
-                          re-read on every reconnect. If it publishes none,
-                          all four are listed. None until the first connect.
+                          e.g. ["off", "heat", "cool"]. Taken from the
+                          valid-values the thermostat publishes for its mode
+                          characteristic and re-read on every reconnect. If it
+                          publishes none, all four are listed. None until the
+                          first connect. Note: Ecobees always publish all four,
+                          even with Auto Heat/Cool disabled on the thermostat
+                          (and accept auto over HomeKit anyway); tested.
           limits        : {"target", "heat_threshold", "cool_threshold"} ->
                           [min, max] in F (limits_c: in C) as published by
                           the thermostat; None where it publishes no range.
@@ -831,8 +833,9 @@ class EcobeeController:
 
         Returns {'ok': True, 'heat_threshold': F, 'cool_threshold': F} with
         the values read back from the thermostat afterwards, which can
-        differ from what was asked: an Ecobee keeps a minimum gap between
-        the two (see the README for what it does when they're too close).
+        differ from what was asked if a thermostat adjusts them. Ecobees
+        accept any gap over HomeKit (tested down to 0.5 C in auto mode) and
+        keep both values, so enforce a minimum gap yourself if you want one.
         """
         err = self._unknown(label)
         if err:
@@ -1364,7 +1367,7 @@ class EcobeeController:
             )
             main_ids, sensor_specs = self._find_ids(pairing)
             # allowed modes and setting ranges, re-read on every connect
-            # (e.g. Auto Heat/Cool can be switched off at the thermostat)
+            # (a thermostat may change what it publishes)
             meta = _raw_metadata(raw)
             self._state[label]["meta"] = meta
             cache = self.cache[label]
@@ -1511,7 +1514,7 @@ class EcobeeController:
                 if err:
                     return {"ok": False, "error": err}
                 # read back what the thermostat actually kept (it may move
-                # one threshold to keep its minimum gap)
+                # one threshold; Ecobees were tested not to)
                 try:
                     readings = await asyncio.wait_for(
                         pairing.get_characteristics([hid, cid]), timeout=8.0)
@@ -2138,8 +2141,8 @@ def launch_gui(ec, poll_ms=2000):
             ttc = st.get("target_temp_c")
             w["tgt"].config(text=fmt_temp(tt, ttc) if isinstance(tt, int) else "--")
 
-        # offer only the modes this thermostat allows (e.g. no Auto when
-        # Auto Heat/Cool is turned off on it); all of them until known
+        # offer only the modes this thermostat says it allows over HomeKit;
+        # all of them until known
         allowed = st.get("modes")
         shown = [mv for mv in w["mode_btns"]
                  if allowed is None or MODE_NAMES[mv].lower() in allowed]

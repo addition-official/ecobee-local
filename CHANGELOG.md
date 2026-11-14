@@ -6,12 +6,12 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 
 ### Added
 - `get_status()` has new fields per thermostat:
-  - `modes`: the modes this thermostat allows, e.g. `["off", "heat", "cool"]` when Auto Heat/Cool is turned off on it (from what it publishes over HomeKit, re-read on every reconnect; all four if it publishes nothing).
+  - `modes`: the modes the thermostat says it allows over HomeKit, e.g. `["off", "heat", "cool"]` (re-read on every reconnect; all four if it publishes nothing). Ecobees always publish all four, even with Auto Heat/Cool disabled, and accept auto over HomeKit anyway (tested on real hardware).
   - `limits` / `limits_c`: the allowed `[min, max]` for the target and the heat/cool thresholds, in °F / °C, as published by the thermostat.
   - `offline_reason`: `"unpaired"` (re-pair it) or `"unreachable"` (network, power), `None` while online.
   - `updated_at`: when the last reading arrived (epoch seconds).
 - `set_mode()` refuses a mode the thermostat doesn't allow, with e.g. `"auto mode is turned off on this thermostat"`, instead of sending it.
-- `set_range(label, heat, cool)` and `ecobee-hub --set-range HEAT COOL` set both auto-mode thresholds in one request, and return what the thermostat actually kept.
+- `set_range(label, heat, cool)` and `ecobee-hub --set-range HEAT COOL` set both auto-mode thresholds in one request, and return what the thermostat actually kept. Ecobees accept any gap over HomeKit (tested down to 0.5°C in auto mode).
 - `--status` shows the new fields, `--watch` reports changes to `modes` and `offline_reason`, `--dump` has a VALID column, and the control window only offers the modes the thermostat allows.
 
 ### Fixed
