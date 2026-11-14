@@ -4,6 +4,8 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 
 ## Unreleased
 
+## 1.3.0
+
 ### Added
 - `get_status()` has new fields per thermostat:
   - `modes`: the modes the thermostat says it allows over HomeKit, e.g. `["off", "heat", "cool"]` (re-read on every reconnect; all four if it publishes nothing). Ecobees always publish all four, even with Auto Heat/Cool disabled, and accept auto over HomeKit anyway (tested on real hardware).
