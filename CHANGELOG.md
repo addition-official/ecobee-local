@@ -10,6 +10,13 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - `stop()` called immediately after `start()` (before the background loop existed) did nothing, leaving the controller running. A command racing a `stop()` on another thread could raise instead of returning an error.
 - `get_status()` returned the controller's own `modes`, `limits` and `sensors` lists, so changing them changed the controller (for example removing `"auto"` from the returned `modes` made `set_mode("auto")` refuse). It now returns independent copies.
 - After a `stop()` and `start()`, a recent `set_comfort_mode()` could hide the thermostat's real comfort profile until the next poll.
+- Unusual mode metadata from a thermostat (values of the wrong type, or no known mode at all) made every connection fail, so the thermostat stayed "unreachable" for good. It's now treated like no metadata: all four modes. `limits` ignores non-numbers and reversed ranges, and `--dump` no longer crashes on an odd value range.
+- Very large numbers (like `1e308`) passed to `set_temp()`, `set_range()` and friends raised `OverflowError` instead of returning `{"ok": False, "error": "invalid temperature ..."}`. Values beyond ±1,000,000 are now rejected as invalid.
+- A pairing file holding JSON that isn't an object was reported as `offline_reason: "unreachable"` instead of `"unpaired"`, and `--dump` crashed on a broken pairing file.
+- Configured modes that don't overlap with what the thermostat publishes left no allowed mode without saying why; this now prints a warning.
+- `ecobee-hub --dump` together with `--watch`, `--status` or `--headless` silently ignored the other option; it's now an error, like `--dump` with `--set-*`.
+- `set_range()`'s "heat must be below cool" error now explains when two different values became equal after rounding to 0.5 °C.
+- `EcobeeController(modes=[])` is now an error (it must be a dict), and `modes={"label": None}` means "not configured" for that thermostat, like `add_thermostat(modes=None)`.
 
 ## 1.3.0
 

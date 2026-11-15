@@ -151,17 +151,29 @@ def _raw_metadata(raw):
     return meta
 
 
+def _real(x):
+    """A finite int/float (not a bool, not text)."""
+    import math
+    return isinstance(x, (int, float)) and not isinstance(x, bool) \
+        and math.isfinite(x)
+
+
 def _allowed_modes(meta, mode_id):
     """Allowed mode names in order, from the mode characteristic's
-    valid-values (or valid-values-range); all four if it publishes none."""
+    valid-values (or valid-values-range). All four if it publishes none,
+    or publishes something unusable (wrong types, no known mode)."""
     ch = meta.get(mode_id) or {}
     values = ch.get("valid-values")
     rng = ch.get("valid-values-range")
-    if not values and isinstance(rng, list) and len(rng) == 2:
-        values = [v for v in _MODE_ORDER if rng[0] <= v <= rng[1]]
-    if not values:
-        return [_MODE_LABELS[v] for v in _MODE_ORDER]
-    return [_MODE_LABELS[v] for v in _MODE_ORDER if v in values]
+    known = []
+    if isinstance(values, list) and values:
+        nums = [v for v in values if _real(v)]
+        known = [m for m in _MODE_ORDER if m in nums]
+    elif isinstance(rng, list) and len(rng) == 2 and all(map(_real, rng)):
+        known = [m for m in _MODE_ORDER if rng[0] <= m <= rng[1]]
+    if not known:
+        known = list(_MODE_ORDER)
+    return [_MODE_LABELS[m] for m in known]
 
 
 def _limits(meta, main_ids):
@@ -171,10 +183,10 @@ def _limits(meta, main_ids):
     for key, char in _LIMIT_KEYS.items():
         ch = meta.get(main_ids.get(char)) or {}
         lo, hi = ch.get("minValue"), ch.get("maxValue")
-        try:
+        if _real(lo) and _real(hi) and lo <= hi:
             c[key] = [float(lo), float(hi)]
             f[key] = [_c_to_f(lo), _c_to_f(hi)]
-        except (TypeError, ValueError, OverflowError):
+        else:
             c[key] = f[key] = None
     return f, c
 
@@ -318,8 +330,8 @@ def _number(value, what):
         number = float(value)
     except (TypeError, ValueError, OverflowError):
         return None, bad
-    if not math.isfinite(number):
-        return None, bad
+    if not math.isfinite(number) or abs(number) > 1e6:
+        return None, bad   # (huge values would overflow the conversions)
     return number, None
 
 
@@ -457,9 +469,11 @@ class EcobeeController:
         self.labels = list(self._pair_paths.keys())
 
         # user-configured allowed modes: constructor first, then the file
-        modes = modes or {}
+        if modes is None:
+            modes = {}
         if not isinstance(modes, dict):
             raise ValueError("modes must be a dict of {label: [mode names]}")
+        modes = {k: v for k, v in modes.items() if v is not None}
         unknown = [label for label in modes if label not in self._pair_paths]
         if unknown:
             raise ValueError(f"modes: unknown thermostat {unknown[0]!r} "
@@ -951,8 +965,12 @@ class EcobeeController:
             return err
         heat_c, cool_c = _f_to_c_half(heat), _f_to_c_half(cool)
         if heat_c >= cool_c:
+            why = "" if heat >= cool else (
+                " (after rounding both to 0.5 C steps, as HomeKit takes "
+                "them, they're equal)")
             return {"ok": False,
-                    "error": f"heat ({heat_f}) must be below cool ({cool_f})"}
+                    "error": f"heat ({heat_f}) must be below cool "
+                             f"({cool_f}){why}"}
         return self._run(self._set_range(label, heat_c, cool_c),
                          timeout=timeout)
 
@@ -1476,6 +1494,11 @@ class EcobeeController:
                 self.cache[label]["online"] = False
                 self.cache[label]["offline_reason"] = "unpaired"
                 return False
+            if not isinstance(pdata, dict):
+                print(f"[{label}] pairing file is not a JSON object")
+                self.cache[label]["online"] = False
+                self.cache[label]["offline_reason"] = "unpaired"
+                return False
             if not pdata:
                 print(f"[{label}] pairing file empty")
                 self.cache[label]["online"] = False
@@ -1494,14 +1517,25 @@ class EcobeeController:
             main_ids, sensor_specs = self._find_ids(pairing)
             # allowed modes and setting ranges, re-read on every connect
             # (a thermostat may change what it publishes)
-            meta = _raw_metadata(raw)
+            # (odd metadata must never cost us the connection)
+            try:
+                meta = _raw_metadata(raw)
+                published = _allowed_modes(meta, main_ids.get("mode"))
+                limits = _limits(meta, main_ids)
+            except Exception:
+                meta, published = {}, [_MODE_LABELS[m] for m in _MODE_ORDER]
+                limits = _limits({}, {})
             self._state[label]["meta"] = meta
             cache = self.cache[label]
-            published = _allowed_modes(meta, main_ids.get("mode"))
             configured = self._configured_modes.get(label)
             cache["modes"] = published if configured is None else [
                 m for m in configured if m in published]
-            cache["limits"], cache["limits_c"] = _limits(meta, main_ids)
+            if configured is not None and not cache["modes"]:
+                print(f"[{label}] warning: none of the configured modes "
+                      f"({', '.join(configured)}) are available on this "
+                      f"thermostat (it has {', '.join(published)}); no mode "
+                      f"can be set", file=sys.stderr)
+            cache["limits"], cache["limits_c"] = limits
 
             want = self._wanted(main_ids, sensor_specs)
             readings = await asyncio.wait_for(
@@ -1741,8 +1775,15 @@ class EcobeeController:
             path = self._pair_paths[label]
             if not os.path.exists(path):
                 return [{"error": f"pairing file missing: {path}"}]
-            with open(path, "r") as f:
-                pdata = json.load(f)
+            try:
+                with open(path, "r") as f:
+                    pdata = json.load(f)
+            except (OSError, ValueError) as e:
+                return {"ok": False,
+                        "error": f"pairing file unreadable: {path}: {e}"}
+            if not isinstance(pdata, dict):
+                return {"ok": False,
+                        "error": f"pairing file is not a JSON object: {path}"}
             creds = {k: v for k, v in pdata.items() if k not in _META_KEYS}
             controller = Controller()
             temp_pairing = IpPairing(controller, creds)
@@ -1772,8 +1813,11 @@ class EcobeeController:
                         # aiohomekit's filled-in defaults); None if absent
                         m = meta.get((acc.aid, ch.iid)) or {}
                         valid = m.get("valid-values")
-                        if valid is None and m.get("valid-values-range"):
-                            valid = "{}-{}".format(*m["valid-values-range"])
+                        rng = m.get("valid-values-range")
+                        if valid is None and rng is not None:
+                            valid = ("{}-{}".format(*rng)
+                                     if isinstance(rng, list) and len(rng) == 2
+                                     else repr(rng))   # odd: show it as is
                         rows.append({
                             "aid": acc.aid,
                             "iid": ch.iid,
@@ -2645,6 +2689,10 @@ def main():
         fail(f"{requested[0]} needs --label (which thermostat?)")
     if requested and args.dump:
         fail(f"--dump can't be combined with {requested[0]}")
+    if args.dump:
+        for flag in ("--watch", "--status", "--headless"):
+            if getattr(args, flag[2:]):
+                fail(f"--dump can't be combined with {flag}")
 
     ec = EcobeeController.from_folder(app_folder=args.folder, debug=args.debug)
     if not ec.labels:
