@@ -561,3 +561,11 @@ def test_help_shows_defaults(capsys, monkeypatch):
         m.main()
     out = capsys.readouterr().out
     assert "localhost" in out and "1883" in out and "--username" in out
+
+
+def test_state_not_retained_unless_asked(bridge):
+    ec, client, _, run = bridge
+    run()
+    state = [(t, r) for t, _, r in client.published
+             if not t.endswith("/bridge/online")]
+    assert state and not any(r for _, r in state)

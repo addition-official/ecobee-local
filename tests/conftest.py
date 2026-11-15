@@ -233,6 +233,9 @@ class FakeDevice:
         self.connect_delay = 0    # seconds before connecting succeeds/fails
         self.write_delay = 0      # seconds before a write is applied
         self.close_delay = 0      # seconds closing a connection takes
+        # a threading.Event: reads take their values, then wait for it
+        self.read_gate = None
+        self.read_waiting = 0     # reads currently held at the gate
         self.writes = []          # every (aid, iid, value) written
         self.write_calls = []     # the list passed to each put
         # minimum heat/cool gap in Celsius the thermostat enforces on a
@@ -295,6 +298,14 @@ class FakePairing:
                             "description": "Resource is busy, try again."}
             else:
                 out[cid] = {"value": self.device.values.get(cid)}
+        gate = self.device.read_gate
+        if gate is not None:
+            self.device.read_waiting += 1
+            try:
+                while not gate.is_set():
+                    await asyncio.sleep(0.01)
+            finally:
+                self.device.read_waiting -= 1
         return out
 
     async def put_characteristics(self, chars):

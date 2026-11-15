@@ -1183,7 +1183,13 @@ class EcobeeController:
             # connect holds the per-thermostat lock; otherwise a refresh or
             # setter called right after start() could open a second
             # connection at the same time and the first would never be closed
-            await self._refresh(label)
+            try:
+                await self._refresh(label)
+            except Exception as e:
+                # never let one thermostat's surprise stop the others, or
+                # the health loop that retries it
+                print(f"[{label}] initial connect error: "
+                      f"{type(e).__name__}: {e}")
 
     def _find_ids(self, pairing):
         """

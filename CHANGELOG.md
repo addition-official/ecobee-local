@@ -29,6 +29,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 - Configured modes that don't overlap with what the thermostat publishes left no allowed mode without saying why; this now prints a warning.
 - `ecobee-hub --dump` together with `--watch`, `--status` or `--headless` silently ignored the other option; it's now an error, like `--dump` with `--set-*`.
 - `set_range()`'s "heat must be below cool" error now explains when two different values became equal after rounding to 0.5 °C.
+- An unexpected error during a thermostat's very first connection attempt stopped the background polling for all thermostats, so nothing reconnected later. It's now reported and polling carries on.
 - **Security:** in `ecobee-pair`, a device on the network announcing the same id as your thermostat could silently replace it in the list, so you'd pair with the wrong device. Both now stay in the list, with a warning to check the IP address.
 - **Security:** text supplied by devices on the network (names in `ecobee-pair`'s list, sensor names in `--status` and `--watch`, values in `--dump`) was printed as-is, so a device could send terminal escape codes. Control characters are now shown as `?`.
 - `ecobee-pair` refuses file names containing `:` (Windows drive and stream names). When re-pairing over a file, it says it's keeping the allowed modes, and drops (with a message) a `"_modes"` value that isn't valid.

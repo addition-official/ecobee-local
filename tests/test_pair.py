@@ -500,3 +500,35 @@ def test_repairing_says_it_keeps_modes(tmp_path, monkeypatch, scans,
     saved = json.loads((tmp_path / "pair.json").read_text())
     assert saved["_modes"] == ["off", "heat"]
     assert "keeping allowed modes: off, heat" in capsys.readouterr().out
+
+
+def test_overwrite_prompt_defaults_to_no(tmp_path, monkeypatch, scans,
+                                         fake_pair):
+    (tmp_path / "pair.json").write_text('{"keep": true}')
+    scans.append([TARGET])
+    scripted_input(monkeypatch, ["main", "1", "", "", "pair.json", ""])
+    asyncio.run(p.wizard(str(tmp_path)))
+    assert json.loads((tmp_path / "pair.json").read_text()) == {"keep": True}
+    assert fake_pair == []
+
+
+def test_device_number_zero_is_not_a_choice(tmp_path, monkeypatch, scans,
+                                            fake_pair, capsys):
+    other = dict(TARGET, name="Other", id="11:22", ip="192.0.2.99")
+    scans.extend([[TARGET, other], [TARGET, other]])
+    scripted_input(monkeypatch, ["", "y", "0", "q"])
+    asyncio.run(p.wizard(str(tmp_path)))
+    assert "not a valid choice" in capsys.readouterr().out
+    assert fake_pair == []
+
+
+def test_search_term_is_trimmed(tmp_path, monkeypatch):
+    seen = []
+
+    async def fake_scan(name_filter="", timeout=8.0):
+        seen.append(name_filter)
+        return []
+    monkeypatch.setattr(p, "scan", fake_scan)
+    scripted_input(monkeypatch, ["  main  ", "q"])
+    asyncio.run(p.wizard(str(tmp_path)))
+    assert seen == ["main"]
