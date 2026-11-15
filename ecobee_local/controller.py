@@ -17,11 +17,14 @@ never block on the device; only writes touch the thermostat.
 
 Pairing files
 -------------
-Each thermostat is one JSON file created by ecobee-pair. A file may include
-two extra keys that this module reads (and ecobee-pair writes):
+Each thermostat is one JSON file created by ecobee-pair. Besides the HomeKit
+keys, a file may include these, which this module reads (they're never sent
+to the thermostat):
 
     "_label":  short id used in code / API calls (e.g. "main")
     "_name":   friendly display name (e.g. "Main Floor")
+    "_modes":  allowed modes, e.g. ["off", "heat", "cool"] (optional; the
+               constructor's modes= argument takes precedence)
 
 Older files without these still work; the label falls back to the filename stem.
 
@@ -1098,7 +1101,10 @@ class EcobeeController:
 
         Useful for discovering what a specific model supports so you can map
         extra characteristics (thresholds, humidity, air quality, ecobee
-        vendor-specific ones) into the controller. Returns a list of dicts.
+        vendor-specific ones) into the controller. Returns a list of dicts
+        (one per characteristic); [{"error": ...}] if the pairing file is
+        missing; or {"ok": False, "error": ...} if the pairing file is
+        broken or the thermostat can't be reached.
         """
         err = self._unknown(label)
         if err:

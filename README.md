@@ -82,6 +82,7 @@ ecobee-hub --label main --set-heat 68 --set-cool 75   # auto-mode range
 ecobee-hub --label main --set-range 68 75             # both thresholds in one request
 ecobee-hub --label main --set-fan on
 ecobee-hub --label main --set-comfort away            # home/sleep/away/hold (supported models)
+ecobee-hub --label main --set-humidity 40             # target humidity (models with a humidifier)
 ecobee-hub --headless                                 # run as a background service (no GUI)
 ecobee-hub --debug                                    # print connection/subscription events
 ecobee-hub --folder PATH                              # use a different credentials folder
@@ -91,7 +92,9 @@ ecobee-hub --folder PATH                              # use a different credenti
 
 `--folder` can point at a folder that has other JSON files too (for example your own app's folder): only files that hold HomeKit pairings are used.
 
-`--dump` is the tool for discovering what your specific model exposes: it prints every accessory, service, and characteristic with its UUID, current value, permissions, and range.
+`--dump` is the tool for discovering what your specific model exposes: it prints every characteristic of every accessory with its UUID, description, current value, permissions, and the range and valid values the thermostat publishes. It can't be combined with `--set-*`, `--status`, `--watch` or `--headless`.
+
+Exit codes: 0 when everything worked, 1 when a `--set-*` failed, a thermostat couldn't be dumped, or there are no pairing files for what you asked, and 2 for a usage mistake like a missing or unknown `--label`. A one-shot `--set-*` run prints the status of every thermostat afterwards, not only the `--label` one.
 
 ## Use it as a library
 
@@ -141,14 +144,32 @@ remove = ec.on_change(changed)   # call remove() to stop
 
 Callbacks run on the controller's background thread: keep them quick, and don't call the controller's commands (`set_temp` etc.) from inside one. Those return an error there; hand the work to another thread instead.
 
-`get_status()` returns a dict per thermostat. A few fields are computed for convenience:
+`get_status()` returns a dict per thermostat (`get_status("main")` for one; an unknown label raises `KeyError`). Each is an independent copy, so changing it doesn't affect the controller. Besides the readings, it has:
 
-- `setpoint_kind` is `"single"` in heat/cool/off and `"range"` in auto.
-- `display_target` is the value(s) a UI should show: one number in single-setpoint modes, `{"heat": ..., "cool": ...}` in auto.
+- `setpoint_kind`: `"single"` in heat/cool/off and `"range"` in auto.
+- `display_target`: the value(s) a UI should show: one number in single-setpoint modes, `{"heat": ..., "cool": ...}` in auto.
 - In auto mode `target_temp` is `None`, because a single target is meaningless there - the thermostat runs off the heat/cool thresholds. Read `heat_threshold` / `cool_threshold` (or `display_target`) instead.
 - Temperatures are in Fahrenheit; the raw Celsius the device reports is also included as `*_c` (e.g. `target_temp_c`).
-- Fields a given model doesn't support read as `"--"` rather than a misleading `0`.
-- `modes` lists the modes the thermostat says it allows over HomeKit, in order, e.g. `["off", "heat", "cool"]` from a thermostat that publishes no auto. It's re-read on every reconnect; if the thermostat publishes nothing, all four are listed. `None` until the first connection. `set_mode()` refuses a mode that isn't listed (`"auto mode is turned off on this thermostat"`). Tested on real Ecobees: they publish all four modes whether or not Auto Heat/Cool is enabled on the thermostat, and they accept auto over HomeKit even when it's disabled, so on an Ecobee `modes` is always all four and doesn't reflect that setting. To fix that, tell the library which modes to allow yourself (next section).
+- Fields a given model doesn't support, or that haven't been read yet, are `"--"` rather than a misleading `0` (`None` for the `*_c` fields, `limits` entries and sensor fields).
+- `modes`: the modes this thermostat may be set to, in order, e.g. `["off", "heat", "cool"]`. It's the list you configured (see [Choosing which modes are allowed](#choosing-which-modes-are-allowed)), or else what the thermostat publishes over HomeKit, re-read on every reconnect; if it publishes nothing usable, all four. `None` until the first connection, unless you configured it. `set_mode()` refuses a mode that isn't listed (`"auto mode is turned off on this thermostat"`). Tested on real Ecobees: they publish all four modes whether or not Auto Heat/Cool is enabled on the thermostat, and accept auto over HomeKit even when it's disabled, so on an Ecobee configure `modes` yourself if that matters.
+- `limits`: the allowed `[min, max]` for `target`, `heat_threshold` and `cool_threshold` in Fahrenheit (`limits_c` in Celsius), as published by the thermostat; `None` where it publishes no usable range.
+- `offline_reason`: why a thermostat is offline. `"unpaired"` when it no longer accepts our pairing (HomeKit was reset on it, it was re-paired elsewhere, or the pairing file is missing or broken), so re-pairing is the fix; `"unreachable"` when it just doesn't answer (network, power). `None` while online, before the first connection attempt, and after `stop()`.
+- `updated_at`: when the last reading arrived from that thermostat (epoch seconds, `None` before the first one), so you can spot stale data. A new reading with nothing else changed doesn't trigger `on_change`.
+
+Other methods, in short (setters return `{"ok": True}` or `{"ok": False, "error": ...}` and never raise for bad input or an unknown label):
+
+| Method | What it does |
+|---|---|
+| `set_heat_threshold_c()`, `set_cool_threshold_c()` | thresholds in Celsius |
+| `set_target_humidity(label, percent)` | target humidity, 0-100 (models with a humidifier/dehumidifier) |
+| `set_display_units(label, fahrenheit)` | units shown on the thermostat itself (`True` for °F) |
+| `refresh(label)` | read the thermostat now instead of waiting for the next update |
+| `list_thermostats()` | `[{"label", "name", "online"}, ...]` |
+| `add_thermostat(filename, label=None, name=None, modes=None)` | add one more pairing file before `start()` |
+| `dump_characteristics(label)` | everything the thermostat exposes, as a list of dicts (or an error dict) |
+| `EcobeeController.from_folder(app_folder=None, pattern="*.json", ...)` | every pairing file in a folder; `pattern` narrows it |
+
+`stop()` closes the connections; commands still running get `{"ok": False, "error": "controller stopped"}`. From inside an `on_change` callback, commands return an error and `stop()` raises `RuntimeError` (both would otherwise freeze the controller's thread).
 
 ### Choosing which modes are allowed
 
@@ -167,12 +188,9 @@ ec = EcobeeController(
 "_modes": ["off", "heat", "cool"]
 ```
 
-If both are set, the constructor wins. Without either, the thermostat's own HomeKit list is used, and if the thermostat publishes a narrower list than yours, only modes in both are allowed. An unknown mode name or label in `modes=` raises `ValueError`; an invalid `"_modes"` in a file is ignored with a warning.
+If both are set, the constructor wins. Without either, the thermostat's own HomeKit list is used. If the thermostat publishes a narrower list than yours, only modes in both are allowed, and if none are left, a warning is printed (and no mode can be set). An unknown mode name or label in `modes=` raises `ValueError`; an invalid `"_modes"` in a file is ignored with a warning.
 
 **Re-pairing caveat:** `"_modes"` lives in the pairing file, so anything that rewrites that file when a thermostat is re-paired can silently drop it. `ecobee-pair` keeps it when you re-pair over the same file, but other tools may not. If your own program rewrites pairing files, pass `modes=` to the constructor instead.
-- `limits` holds the allowed `[min, max]` for `target`, `heat_threshold` and `cool_threshold` in Fahrenheit (`limits_c` in Celsius), as published by the thermostat; `None` where it publishes no range.
-- `offline_reason` says why a thermostat is offline: `"unpaired"` when it no longer accepts our pairing (HomeKit was reset on it, it was re-paired elsewhere, or the pairing file is missing or broken), so re-pairing is the fix; `"unreachable"` when it just doesn't answer (network, power). `None` while online, and before the first connection attempt.
-- `updated_at` is when the last reading arrived from that thermostat (epoch seconds, `None` before the first one), so you can spot stale data. A new reading with nothing else changed doesn't trigger `on_change`.
 
 ### Heat/cool thresholds on an Ecobee
 
@@ -207,32 +225,60 @@ Run it:
 
     ecobee-mqtt                       # broker at localhost:1883
     ecobee-mqtt --host 192.168.1.50   # broker elsewhere
+    ecobee-mqtt --host broker.lan --port 8883 --tls --username me
+
+Options: `--host` (default `localhost`), `--port` (default `1883`; brokers
+usually use `8883` for TLS), `--username` / `--password`, `--tls` and
+`--ca-file PATH` (TLS, with the system's or your own CA certificate),
+`--prefix` (topic prefix, default `ecobee`), `--interval` (seconds between
+state publishes, default 5), `--retain` (publish state as retained messages)
+and `--folder` (where the pairing files are).
 
 (Cloned instead of installed? `pip install ".[mqtt]"` from the repo, then
 `python -m ecobee_local.mqtt`.)
 
-It publishes state to `ecobee/<label>/<field>` (temperature, target, mode,
-humidity, fan, comfort, plus a full JSON blob at `ecobee/<label>/state`),
-`ecobee/<label>/offline_reason` (`none`, or `unpaired` when the thermostat
-needs re-pairing, or `unreachable`) and `ecobee/<label>/modes` (the allowed
-modes, e.g. `off,heat,cool`), and
-listens for commands on `ecobee/<label>/set/<thing>`:
+It publishes, for each thermostat, every `--interval` seconds:
+
+    ecobee/<label>/online           true / false
+    ecobee/<label>/offline_reason   none / unpaired (needs re-pairing) / unreachable
+    ecobee/<label>/modes            off,heat,cool   (allowed modes; empty if none)
+    ecobee/<label>/temperature      78
+    ecobee/<label>/target           75   ("none" in auto mode: use the thresholds)
+    ecobee/<label>/mode             off / heat / cool / auto
+    ecobee/<label>/heat_threshold   68
+    ecobee/<label>/cool_threshold   75
+    ecobee/<label>/humidity         57
+    ecobee/<label>/fan              auto / on
+    ecobee/<label>/comfort          home / sleep / away / hold
+    ecobee/<label>/state            everything above (and more) as one JSON object
+
+Readings that haven't arrived yet aren't published (`online` and `offline_reason` always are). `ecobee/bridge/online` is
+`true` while the bridge runs and turns `false` when it stops or loses its
+connection (a retained last-will message).
+
+It listens for commands on `ecobee/<label>/set/<thing>`:
 
     ecobee/<label>/set/target     72        (Fahrenheit)
     ecobee/<label>/set/target_c   22.5      (Celsius)
-    ecobee/<label>/set/mode       cool      (off/heat/cool/auto)
+    ecobee/<label>/set/mode       cool      (off/heat/cool/auto, or 0-3)
+    ecobee/<label>/set/heat       68        (auto-mode heat threshold, F)
+    ecobee/<label>/set/cool       75        (auto-mode cool threshold, F)
+    ecobee/<label>/set/range      68,75     (both thresholds at once, F)
     ecobee/<label>/set/fan        auto      (auto/on)
-    ecobee/<label>/set/humidity   40
+    ecobee/<label>/set/humidity   40        (percent)
     ecobee/<label>/set/comfort    away      (home/sleep/away/hold)
 
-Commands must be sent as normal (not retained) messages; retained ones are
-ignored, because the broker would replay them every time the bridge reconnects.
+Commands run one at a time, in the order they arrive. Results are logged by the
+bridge (errors to stderr). Commands must be sent as normal (not retained)
+messages; retained ones are ignored, because the broker would replay them every
+time the bridge reconnects.
 
 If your broker needs a login, use `--username` and put the password in the
 `ECOBEE_MQTT_PASSWORD` environment variable rather than `--password`, so it
-doesn't show up in the process list. Plain MQTT isn't encrypted: anyone who can
-publish to your broker can control the thermostat, so keep the broker on your
-own network and require a login if others share it.
+doesn't show up in the process list (either one is only used together with
+`--username`). Without `--tls`, MQTT isn't encrypted: anyone who can publish to
+your broker can control the thermostat, so keep the broker on your own network
+and require a login if others share it.
 
 ## Project layout
 

@@ -11,9 +11,10 @@ those files.
 
 Cross-platform: Windows, macOS, Linux.
 
-Each saved file also stores two metadata keys the controller understands:
+Each saved file also stores metadata keys the controller understands:
     "_label"  short id used in code / API calls  (e.g. "main")
     "_name"   friendly display name              (e.g. "Main Floor")
+    "_modes"  allowed modes (only kept from the old file when re-pairing)
 
 You can pair as many thermostats as you like. Filenames can be anything;
 by default the wizard auto-numbers as pair.json, pair1.json, pair2.json, ...
