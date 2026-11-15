@@ -4,6 +4,8 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 
 ## Unreleased
 
+## 1.3.1
+
 ### Added
 - `ecobee-mqtt`:
   - `ecobee/<label>/set/range` with a payload like `68,75` sets both auto-mode thresholds at once.
