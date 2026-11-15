@@ -505,6 +505,8 @@ class EcobeeController:
         # them, and merged so a burst of events causes one read, not fifty
         self._push_tasks = set()
         self._push_pending = set()
+        # commands submitted by _run, so stop() can cancel them too
+        self._run_tasks = set()
         # set once every thermostat has had its first connection attempt
         self._first_connect_done = threading.Event()
         self._started = False
@@ -591,9 +593,24 @@ class EcobeeController:
         """
         if self._started:
             return
+        # a previous stop() may still be finishing its shutdown in the
+        # background (it only waits `timeout`); let it finish first, or it
+        # would close the connections this start() opens
+        old = self._thread
+        if old is not None and old.is_alive():
+            old.join(timeout=10)
+            if old.is_alive():
+                raise RuntimeError("the previous stop() is still closing "
+                                   "connections; try start() again later")
+        self._thread = None
+        self._loop = None
         self._started = True
         self._stopping = False
         self._auto_connect = connect
+        # a comfort hold from before the restart would make the first
+        # readings look stale, and its re-read timer died with the old loop
+        self._comfort_hold = {label: 0 for label in self.labels}
+        self._comfort_before = {}
         self._first_connect_done.clear()
         self._loop_ready.clear()
         self._push_pending.clear()
@@ -641,11 +658,19 @@ class EcobeeController:
         Safe to call more than once. Frees the connection slots on each
         thermostat promptly instead of waiting for the process to exit.
         """
-        if not self._started or self._loop is None:
+        if not self._started:
             return
         if self._on_loop_thread():
             raise RuntimeError(f"stop() {_CALLBACK_THREAD_ERROR}")
+        if self._loop is None:
+            # start() returned before its thread had made the loop
+            self._loop_ready.wait(timeout)
         loop = self._loop
+        if loop is None:
+            # still no loop: tell the thread not to start one at all
+            self._started = False
+            self._stopping = True
+            return
         # from here on, new commands fail straight away and nothing new
         # (push refreshes, reconnects) gets started
         self._started = False
@@ -668,11 +693,13 @@ class EcobeeController:
                 task.cancel()
                 await asyncio.wait({task}, timeout=0.5)
             # refreshes started by push events
-            pushes = set(self._push_tasks)
-            for t in pushes:
+            # and commands in flight (their callers get an error now, and a
+            # connection they were opening gets closed)
+            pending = set(self._push_tasks) | set(self._run_tasks)
+            for t in pending:
                 t.cancel()
-            if pushes:
-                await asyncio.wait(pushes, timeout=1.0)
+            if pending:
+                await asyncio.wait(pending, timeout=1.0)
             for label in self.labels:
                 st = self._state.get(label, {})
                 pairing = st.get("pairing")
@@ -681,7 +708,8 @@ class EcobeeController:
                         await pairing.close()
                     except Exception:
                         pass
-                    st["pairing"] = None
+                    if st.get("pairing") is pairing:
+                        st["pairing"] = None
                 self.cache[label]["online"] = False
                 self._notify(label)
 
@@ -710,7 +738,9 @@ class EcobeeController:
                 pass
         self._loop = None
         self._loop_thread = None
-        self._thread = None
+        if thread is None or not thread.is_alive():
+            self._thread = None
+        # (else keep it: the next start() waits for that shutdown to end)
         self._main_task = None
 
     def on_change(self, callback):
@@ -797,7 +827,9 @@ class EcobeeController:
         return self._status_for(label)
 
     def _status_for(self, label):
-        s = dict(self.cache[label])
+        # a deep copy: callers editing what they got (modes, limits,
+        # sensors) must not change the controller's own state
+        s = copy.deepcopy(self.cache[label])
         if s.get("mode") == self.MODE_AUTO:
             s["setpoint_kind"] = "range"
             s["display_target"] = {
@@ -1052,16 +1084,37 @@ class EcobeeController:
     # ------------------------------------------------------------- internals
 
     def _run(self, coro, timeout=12.0):
+        not_started = {"ok": False, "error": "controller not started"}
         if self._loop is None or not self._started:
             coro.close()
-            return {"ok": False, "error": "controller not started"}
+            return not_started
         if self._on_loop_thread():
             # waiting here would block the very loop that has to do the work
             coro.close()
             return {"ok": False, "error": f"commands {_CALLBACK_THREAD_ERROR}"}
-        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        loop = self._loop          # read once: stop() may clear it any time
+        if loop is None or not self._started or loop.is_closed():
+            coro.close()
+            return not_started
+
+        async def tracked():
+            task = asyncio.current_task()
+            self._run_tasks.add(task)
+            try:
+                return await coro
+            finally:
+                self._run_tasks.discard(task)
+        wrapper = tracked()
+        try:
+            fut = asyncio.run_coroutine_threadsafe(wrapper, loop)
+        except RuntimeError:       # the loop was closed under us
+            wrapper.close()
+            coro.close()
+            return not_started
         try:
             return fut.result(timeout=timeout)
+        except concurrent.futures.CancelledError:
+            return {"ok": False, "error": "controller stopped"}
         except concurrent.futures.TimeoutError:
             if fut.done():
                 # the call itself finished (on Python 3.11+ a TimeoutError
@@ -1076,6 +1129,8 @@ class EcobeeController:
                     "error": "timed out (thermostat busy or reconnecting)"}
 
     def _thread_main(self):
+        if self._stopping:
+            return       # stop() came before this thread got going
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.get_ident()
         asyncio.set_event_loop(self._loop)

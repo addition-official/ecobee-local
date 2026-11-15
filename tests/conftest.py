@@ -232,6 +232,7 @@ class FakeDevice:
         self.swallow_cancel = False
         self.connect_delay = 0    # seconds before connecting succeeds/fails
         self.write_delay = 0      # seconds before a write is applied
+        self.close_delay = 0      # seconds closing a connection takes
         self.writes = []          # every (aid, iid, value) written
         self.write_calls = []     # the list passed to each put
         # minimum heat/cool gap in Celsius the thermostat enforces on a
@@ -343,6 +344,7 @@ class FakePairing:
         self.callback = cb
 
     async def close(self):
+        await asyncio.sleep(self.device.close_delay)
         self.closed = True
 
 

@@ -4,6 +4,13 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 
 ## Unreleased
 
+### Fixed
+- `stop()` while a command was running (for example Ctrl+C in another thread) left that command waiting out its whole timeout, and a connection it was opening stayed open. Running commands are now cancelled and return `{"ok": False, "error": "controller stopped"}`.
+- `start()` right after a `stop()` whose shutdown was still finishing (a slow thermostat) could have the old shutdown close the new connection, leaving the controller offline. `start()` now waits for it.
+- `stop()` called immediately after `start()` (before the background loop existed) did nothing, leaving the controller running. A command racing a `stop()` on another thread could raise instead of returning an error.
+- `get_status()` returned the controller's own `modes`, `limits` and `sensors` lists, so changing them changed the controller (for example removing `"auto"` from the returned `modes` made `set_mode("auto")` refuse). It now returns independent copies.
+- After a `stop()` and `start()`, a recent `set_comfort_mode()` could hide the thermostat's real comfort profile until the next poll.
+
 ## 1.3.0
 
 ### Added
