@@ -15,6 +15,7 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
   - Commands now run on a worker thread, one at a time in the order they arrive. A slow or unreachable thermostat used to block the MQTT connection for up to 12 seconds per command, long enough for the broker to drop the bridge.
   - In auto mode the `target` topic is now `none` (there's no single target then), so an old retained target doesn't look current.
   - `modes` is published as an empty value when no mode is allowed, instead of not being published.
+- The release workflow installs an exact version of the `build` tool instead of whatever is newest.
 
 ### Fixed
 - `stop()` while a command was running (for example Ctrl+C in another thread) left that command waiting out its whole timeout, and a connection it was opening stayed open. Running commands are now cancelled and return `{"ok": False, "error": "controller stopped"}`.
