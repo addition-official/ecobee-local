@@ -4,6 +4,18 @@ What changed in each release on [PyPI](https://pypi.org/project/ecobee-local/). 
 
 ## Unreleased
 
+### Added
+- `ecobee-mqtt`:
+  - `ecobee/<label>/set/range` with a payload like `68,75` sets both auto-mode thresholds at once.
+  - `--tls` and `--ca-file` connect to the broker over TLS.
+  - `--help` shows the defaults.
+
+### Changed
+- `ecobee-mqtt`:
+  - Commands now run on a worker thread, one at a time in the order they arrive. A slow or unreachable thermostat used to block the MQTT connection for up to 12 seconds per command, long enough for the broker to drop the bridge.
+  - In auto mode the `target` topic is now `none` (there's no single target then), so an old retained target doesn't look current.
+  - `modes` is published as an empty value when no mode is allowed, instead of not being published.
+
 ### Fixed
 - `stop()` while a command was running (for example Ctrl+C in another thread) left that command waiting out its whole timeout, and a connection it was opening stayed open. Running commands are now cancelled and return `{"ok": False, "error": "controller stopped"}`.
 - `start()` right after a `stop()` whose shutdown was still finishing (a slow thermostat) could have the old shutdown close the new connection, leaving the controller offline. `start()` now waits for it.

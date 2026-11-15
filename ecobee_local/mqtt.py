@@ -28,6 +28,7 @@ It does two things continuously:
          ecobee/<label>/set/heat         payload: 68        (auto-mode threshold, F)
          ecobee/<label>/set/cool         payload: 75        (auto-mode threshold, F)
          ecobee/<label>/set/fan          payload: auto      (auto/on)
+         ecobee/<label>/set/range        payload: 68,75     (auto heat,cool F)
          ecobee/<label>/set/humidity     payload: 40        (percent)
          ecobee/<label>/set/comfort      payload: away      (home/sleep/away/hold)
 
@@ -49,7 +50,9 @@ topics are plain and documented above so any MQTT client can use them.
 import argparse
 import json
 import os
+import queue
 import sys
+import threading
 import time
 
 try:
@@ -88,8 +91,10 @@ def build_state_payloads(prefix, label, st):
     # why it's offline: "unpaired" (re-pair it), "unreachable", or "none"
     pub("offline_reason", st.get("offline_reason") or "none")
     modes = st.get("modes")
-    if modes:
-        pub("modes", ",".join(modes))   # e.g. off,heat,cool
+    if modes is not None:
+        # e.g. off,heat,cool ("" if none is allowed, so an old retained
+        # value doesn't linger)
+        pub("modes", ",".join(modes))
 
     ct = st.get("current_temp")
     if isinstance(ct, int):
@@ -97,6 +102,10 @@ def build_state_payloads(prefix, label, st):
     tt = st.get("target_temp")
     if isinstance(tt, int):
         pub("target", str(tt))
+    elif tt is None:
+        # auto mode has no single target (see heat_threshold/cool_threshold);
+        # say so, so an old retained target doesn't look current
+        pub("target", "none")
 
     mode = st.get("mode")
     if mode in MODE_TO_STR:
@@ -178,6 +187,13 @@ def make_command_handler(ec, prefix):
                        if fan in ("auto", "on")
                        else {"ok": False,
                              "error": f"bad fan {payload!r} (use auto or on)"})
+            elif thing == "range":
+                # "68,75" (or "68 75"): heat and cool thresholds, F
+                parts = payload.replace(",", " ").split()
+                if len(parts) != 2:
+                    raise ValueError(payload)
+                heat, cool = (int(round(float(x))) for x in parts)
+                res = ec.set_range(label, heat, cool)
             elif thing == "humidity":
                 res = ec.set_target_humidity(label, int(round(float(payload))))
             elif thing == "comfort":
@@ -201,15 +217,26 @@ def make_command_handler(ec, prefix):
 
 def main():
     ap = argparse.ArgumentParser(description="MQTT bridge for ecobee-local")
-    ap.add_argument("--host", default="localhost", help="MQTT broker host")
-    ap.add_argument("--port", type=int, default=1883, help="MQTT broker port")
-    ap.add_argument("--username", default=None)
+    ap.add_argument("--host", default="localhost",
+                    help="MQTT broker host (default: %(default)s)")
+    ap.add_argument("--port", type=int, default=1883,
+                    help="MQTT broker port (default: %(default)s; usually "
+                         "8883 with --tls)")
+    ap.add_argument("--username", default=None, help="broker user name")
     ap.add_argument("--password", default=None,
-                    help="broker password (or set ECOBEE_MQTT_PASSWORD, which "
-                         "keeps it out of the process list)")
-    ap.add_argument("--prefix", default="ecobee", help="topic prefix")
+                    help="broker password, used with --username (or set "
+                         "ECOBEE_MQTT_PASSWORD, which keeps it out of the "
+                         "process list)")
+    ap.add_argument("--tls", action="store_true",
+                    help="connect to the broker over TLS (system CA "
+                         "certificates)")
+    ap.add_argument("--ca-file", default=None,
+                    help="CA certificate file for the broker (implies --tls)")
+    ap.add_argument("--prefix", default="ecobee",
+                    help="topic prefix (default: %(default)s)")
     ap.add_argument("--interval", type=float, default=5.0,
-                    help="seconds between state publishes")
+                    help="seconds between state publishes (default: "
+                         "%(default)s)")
     ap.add_argument("--folder", default=None, help="pairing-files folder")
     ap.add_argument("--retain", action="store_true",
                     help="publish state as retained messages")
@@ -237,6 +264,8 @@ def main():
     prefix = args.prefix.rstrip("/")
 
     client = _make_client()
+    if args.tls or args.ca_file:
+        client.tls_set(ca_certs=args.ca_file)
     if args.username:
         password = args.password
         if password is None:
@@ -262,12 +291,35 @@ def main():
         print(f"listening for commands on {prefix}/<label>/set/<thing>")
 
     client.on_connect = on_connect
-    client.on_message = make_command_handler(ec, prefix)
+    # Commands can take seconds (a slow or unreachable thermostat), so they
+    # run on a worker thread, one at a time in arrival order; paho's network
+    # thread only queues them and stays free to keep the connection alive.
+    handle = make_command_handler(ec, prefix)
+    commands = queue.Queue(maxsize=100)
+
+    def worker():
+        while True:
+            item = commands.get()
+            if item is None:
+                return
+            handle(*item)
+
+    def on_message(cl, userdata, msg):
+        try:
+            commands.put_nowait((cl, userdata, msg))
+        except queue.Full:
+            print(f"[cmd] too many commands waiting; dropped {msg.topic!r}",
+                  file=sys.stderr)
+
+    client.on_message = on_message
+    worker_thread = threading.Thread(target=worker, daemon=True)
+    worker_thread.start()
 
     try:
         client.connect(args.host, args.port, keepalive=60)
     except Exception as e:
         print(f"could not connect to broker: {e}", file=sys.stderr)
+        commands.put(None)
         ec.stop()
         sys.exit(1)
 
@@ -292,6 +344,8 @@ def main():
         client.publish(avail_topic, "false", retain=True)
         client.loop_stop()
         client.disconnect()
+        commands.put(None)               # let queued commands finish first
+        worker_thread.join(timeout=15)
         ec.stop()
 
 

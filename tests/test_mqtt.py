@@ -2,10 +2,13 @@
 
 import json
 import sys
+import time as _time
 
 import pytest
 
 import ecobee_local.mqtt as m
+
+REAL_SLEEP = _time.sleep     # the bridge fixture patches time.sleep
 
 
 STATUS = {
@@ -74,7 +77,8 @@ def test_state_payloads():
 
 
 def test_state_payloads_before_first_read():
-    blank = {"online": False, "current_temp": "--", "target_temp": None,
+    # (as the controller reports it before the first reading)
+    blank = {"online": False, "current_temp": "--", "target_temp": "--",
              "mode": "--", "humidity": "--", "target_fan": "--",
              "comfort_mode": "--", "heat_threshold": "--",
              "cool_threshold": "--"}
@@ -202,13 +206,18 @@ def bridge(monkeypatch):
     monkeypatch.setattr(m.EcobeeController, "from_folder", from_folder)
     monkeypatch.setattr(m, "_make_client", lambda: client)
 
+    while_running = []      # functions to run while the bridge is up
+
     def stop_after_one_publish(seconds):
+        for fn in while_running:
+            fn()
         raise KeyboardInterrupt
     monkeypatch.setattr(m.time, "sleep", stop_after_one_publish)
 
     def run(*argv):
         monkeypatch.setattr(sys, "argv", ["ecobee-mqtt", *argv])
         m.main()
+    run.while_running = while_running
     return ec, client, seen, run
 
 
@@ -230,9 +239,16 @@ def test_bridge_publishes_and_shuts_down(bridge):
 
 
 def test_bridge_routes_commands(bridge):
+    import time
     ec, client, _, run = bridge
+
+    def send():
+        client.on_message(client, None, Msg("ecobee/main/set/mode", "heat"))
+        end = time.monotonic() + 3
+        while not ec.calls and time.monotonic() < end:
+            REAL_SLEEP(0.01)
+    run.while_running.append(send)
     run()
-    client.on_message(client, None, Msg("ecobee/main/set/mode", "heat"))
     assert ec.calls == [("set_mode", "main", 1)]
 
 
@@ -453,3 +469,95 @@ def test_bridge_publishes_new_topics_from_real_controller(connected, device):
                                       connected.get_status("main")))
     assert out["ecobee/main/offline_reason"] == "none"
     assert out["ecobee/main/modes"] == "off,heat,cool,auto"
+
+
+# ------------------------------------------------- second review round
+
+@pytest.mark.parametrize("payload", ["68,75", "68, 75", " 68 75 ",
+                                     "67.6,75.4"])
+def test_set_range_command(payload, capsys):
+    ec = FakeEC()
+    send(ec, "ecobee/main/set/range", payload)
+    assert ec.calls == [("set_range", "main", 68, 75)]
+
+
+@pytest.mark.parametrize("payload", ["68", "68,75,80", "a,b", "", "68,inf"])
+def test_bad_set_range_payload(payload, capsys):
+    ec = FakeEC()
+    send(ec, "ecobee/main/set/range", payload)
+    assert ec.calls == []
+    assert "bad payload" in capsys.readouterr().err
+
+
+def test_target_says_none_in_auto():
+    st = dict(STATUS, mode=3, target_temp=None)
+    out = dict(m.build_state_payloads("ecobee", "main", st))
+    assert out["ecobee/main/target"] == "none"
+
+
+def test_empty_modes_published_as_empty():
+    out = dict(m.build_state_payloads("ecobee", "main",
+                                      dict(STATUS, modes=[])))
+    assert out["ecobee/main/modes"] == ""
+
+
+def test_slow_command_does_not_block_the_mqtt_thread(bridge):
+    import threading
+    import time
+    ec, client, _, run = bridge
+    release = threading.Event()
+    timing = {}
+
+    def slow(*args):
+        release.wait(5)
+        ec.calls.append(("set_mode",) + args)
+        return {"ok": True}
+    ec.set_mode = slow
+
+    def send_while_running():
+        t0 = time.monotonic()
+        client.on_message(client, None, Msg("ecobee/main/set/mode", "heat"))
+        timing["on_message"] = time.monotonic() - t0
+        release.set()
+        end = time.monotonic() + 3
+        while not ec.calls and time.monotonic() < end:
+            REAL_SLEEP(0.01)
+    run.while_running.append(send_while_running)
+    run()
+    assert timing["on_message"] < 0.5      # paho's thread is free again
+    assert ec.calls == [("set_mode", "main", 1)]   # and it still ran
+
+
+def test_commands_still_applied_in_order(bridge):
+    import time
+    ec, client, _, run = bridge
+
+    def send_three():
+        for mode in ("heat", "cool", "off"):
+            client.on_message(client, None,
+                              Msg("ecobee/main/set/mode", mode))
+        end = time.monotonic() + 3
+        while len(ec.calls) < 3 and time.monotonic() < end:
+            REAL_SLEEP(0.01)
+    run.while_running.append(send_three)
+    run()
+    assert ec.calls == [("set_mode", "main", 1), ("set_mode", "main", 2),
+                        ("set_mode", "main", 0)]
+
+
+def test_tls_options(bridge, monkeypatch):
+    ec, client, _, run = bridge
+    seen = {}
+    client.tls_set = lambda **kw: seen.update(kw)
+    run("--tls")
+    assert seen == {"ca_certs": None}
+    run("--ca-file", "/etc/ssl/broker.pem")
+    assert seen == {"ca_certs": "/etc/ssl/broker.pem"}
+
+
+def test_help_shows_defaults(capsys, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["ecobee-mqtt", "--help"])
+    with pytest.raises(SystemExit):
+        m.main()
+    out = capsys.readouterr().out
+    assert "localhost" in out and "1883" in out and "--username" in out
