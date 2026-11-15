@@ -151,6 +151,12 @@ def _raw_metadata(raw):
     return meta
 
 
+def _printable(text):
+    """Text that came from a device made safe for a terminal: control
+    characters (e.g. escape codes) are replaced with '?'."""
+    return "".join(c if c.isprintable() else "?" for c in str(text))
+
+
 def _real(x):
     """A finite int/float (not a bool, not text)."""
     import math
@@ -1886,6 +1892,7 @@ def _print_dump(rows, truncate=True):
         if isinstance(v, (list, tuple)):
             v = ",".join(str(x) for x in v)
         s = str(v)
+        s = _printable(s)
         if truncate and len(s) > 40:
             return s[:37] + "..."
         return s
@@ -2781,12 +2788,12 @@ def main():
             continue
         st = ec.get_status(t["label"])
         sensors = st.pop("sensors", [])
-        print(t["label"], f"({t['name']})", st)
+        print(_printable(t["label"]), f"({_printable(t['name'])})", st)
         for s in sensors:
             temp = f"{s['temperature']}F" if s["temperature"] is not None else "--"
             occ = "" if s["occupancy"] is None else (" occupied" if s["occupancy"] else " empty")
             batt = "" if s["battery"] is None else f" batt {s['battery']}%"
-            print(f"    - {s['name']}: {temp}{occ}{batt}")
+            print(_printable(f"    - {s['name']}: {temp}{occ}{batt}"))
 
     # In headless mode with no action, keep running as a live service so the
     # cache stays fresh (useful as a backend for another app).
@@ -2800,9 +2807,9 @@ def main():
             changes = _describe_changes(previous[label], status)
             previous[label] = status
             if changes:
-                print(f"{time.strftime('%H:%M:%S')} {label} "
-                      f"({ec.get_name(label)}): {', '.join(changes)}",
-                      flush=True)
+                print(_printable(f"{time.strftime('%H:%M:%S')} {label} "
+                                 f"({ec.get_name(label)}): "
+                                 f"{', '.join(changes)}"), flush=True)
 
         stop_watching = ec.on_change(show_change)
         print("watching for changes; Ctrl+C to stop.", flush=True)

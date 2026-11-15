@@ -407,3 +407,39 @@ def test_no_pairing_files_exit_code(tmp_path, monkeypatch, capsys, argv,
         c.main()
     assert exc.value.code == code
     assert "No pairing files found" in capsys.readouterr().out
+
+
+# --------------------------------------------- device text in the terminal
+
+def test_status_escapes_sensor_names(hub, device, capsys):
+    from conftest import SENSOR_NAME
+    device.values[SENSOR_NAME] = "Bed\x1b[2Jroom"
+    hub("--status")
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "Bed" in out
+
+
+def test_dump_escapes_values(hub, device, capsys):
+    from conftest import SENSOR_NAME
+    device.values[SENSOR_NAME] = "x\x1b]0;pwned\x07"
+    for acc in device.accessories:
+        for srv in acc.services:
+            for ch in srv.characteristics:
+                if (acc.aid, ch.iid) == SENSOR_NAME:
+                    ch.value = device.values[SENSOR_NAME]
+    hub("--dump")
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\x07" not in out
+
+
+def test_watch_escapes_changes(hub, device, capsys):
+    from conftest import SENSOR_NAME
+
+    def rename(ec):
+        device.values[SENSOR_NAME] = "Den\x1b[2J"
+        ec.refresh("main")
+    hub.while_running.append(rename)
+    hub("--watch")
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "sensor Den" in out

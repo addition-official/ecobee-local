@@ -101,15 +101,21 @@ def save_pairing(path, data):
         raise
 
 
+def safe(text):
+    """Text from the network (device names, ids) made safe to print: control
+    characters (e.g. terminal escape codes) are replaced with '?'."""
+    return "".join(c if c.isprintable() else "?" for c in str(text))
+
+
 def check_filename(name):
     """
     Return (filename, None) with the extension made a lowercase ".json"
     (so ecobee-hub's *.json search finds it on every OS), or (None, why)
     if it isn't a plain file name.
     """
-    if any(sep in name for sep in ("/", "\\")) or name.startswith("."):
+    if any(sep in name for sep in ("/", "\\", ":")) or name.startswith("."):
         return None, ("that needs to be just a file name, like den.json "
-                      "(no folders, not starting with a dot)")
+                      "(no folders or ':', not starting with a dot)")
     stem = name[:-5] if name.lower().endswith(".json") else name
     if not stem:
         return None, "that needs a name before .json"
@@ -184,11 +190,13 @@ class HapListener:
         def text(b):
             return b.decode("utf-8", "replace") if isinstance(b, bytes) else b
         props = {text(k): text(v) for k, v in (info.properties or {}).items()}
-        # dedupe on device id (fall back to the service name if it has none)
         device_id = props.get("id") or name
-        # dedupe on device id; clean up the noisy mDNS suffix for display
+        # Keep one entry per mDNS service name (the same device announced
+        # twice is still one entry). Not per id: the id is whatever the
+        # advertiser says, so a fake device claiming the thermostat's id
+        # would otherwise silently replace it; the wizard warns instead.
         display = name.replace("._hap._tcp.local.", "")
-        self.devices[device_id] = {
+        self.devices[name] = {
             "ip": ip, "port": port, "name": display,
             "id": device_id, "raw_name": name,
         }
@@ -338,8 +346,13 @@ async def wizard(app_folder=None):
         print()
         print(f"Found {len(devices)} device(s):")
         for i, d in enumerate(devices, 1):
-            print(f"  [{i}] {d['name']}")
-            print(f"      id {d['id']}  ({d['ip']}:{d['port']})")
+            print(f"  [{i}] {safe(d['name'])}")
+            print(f"      id {safe(d['id'])}  ({d['ip']}:{d['port']})")
+        ids = [d["id"] for d in devices]
+        for dup in sorted({i for i in ids if ids.count(i) > 1}):
+            print(f"  ! {ids.count(dup)} devices claim the same id "
+                  f"{safe(dup)}: only one is real. Check the IP address "
+                  f"before choosing.")
         print("  [r] rescan   [s] change search term   [q] quit")
 
         if len(devices) == 1:
@@ -360,12 +373,12 @@ async def wizard(app_folder=None):
 
         target = devices[int(pick) - 1]
 
-    print(f"  selected: {target['name']} ({target['id']})")
+    print(f"  selected: {safe(target['name'])} ({safe(target['id'])})")
 
     # friendly display name (what shows in a UI); defaults to the device name
     friendly = input(
-        f"Friendly display name [{target['name']}]: "
-    ).strip() or target["name"]
+        f"Friendly display name [{safe(target['name'])}]: "
+    ).strip() or safe(target["name"])
 
     # short label used in code; defaults to a sanitized version of the name
     default_label = sanitize(friendly, "thermo")
@@ -393,7 +406,12 @@ async def wizard(app_folder=None):
             with open(target_file, "r") as f:
                 old = json.load(f)
             if isinstance(old, dict) and "_modes" in old:
-                keep_modes = old["_modes"]
+                from .controller import _check_modes
+                try:
+                    keep_modes = _check_modes(old["_modes"])
+                    print(f"  keeping allowed modes: {', '.join(keep_modes)}")
+                except ValueError as e:
+                    print(f"  not keeping \"_modes\" from the old file: {e}")
         except Exception:
             pass
 

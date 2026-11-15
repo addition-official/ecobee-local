@@ -82,7 +82,7 @@ def test_listener_collects_and_dedupes():
     lst = p.HapListener()
     lst.add_service(zc, "_hap._tcp.local.", name)
     lst.add_service(zc, "_hap._tcp.local.", name)       # seen twice
-    assert lst.devices == {"AA:BB:CC:DD:EE:FF": {
+    assert lst.devices == {name: {
         "ip": "192.0.2.10", "port": 1200, "name": "Main Floor",
         "id": "AA:BB:CC:DD:EE:FF", "raw_name": name,
     }}
@@ -98,12 +98,13 @@ def test_listener_filters_and_skips_bad_records():
     for name in zc.infos:
         lst.add_service(zc, "_hap._tcp.local.", name)
     lst.add_service(zc, "_hap._tcp.local.", "Vanished._hap._tcp.local.")
-    assert list(lst.devices) == ["11:22"]
+    assert [d["id"] for d in lst.devices.values()] == ["11:22"]
 
     everything = p.HapListener()
     for name in list(zc.infos) + ["Vanished._hap._tcp.local."]:
         everything.add_service(zc, "_hap._tcp.local.", name)
-    assert sorted(everything.devices) == ["11:22", "33:44"]
+    assert sorted(d["id"] for d in everything.devices.values()) == \
+        ["11:22", "33:44"]
 
 
 def test_scan_closes_zeroconf(monkeypatch):
@@ -431,3 +432,71 @@ def test_repairing_keeps_modes(tmp_path, monkeypatch, scans, fake_pair):
     saved = json.loads((tmp_path / "pair.json").read_text())
     assert saved["AccessoryPairingID"] == "AA"        # new keys
     assert saved["_modes"] == ["off", "cool"]         # setting kept
+
+
+# ------------------------------------------------- second review round
+
+def test_two_devices_claiming_one_id_are_both_listed(tmp_path, monkeypatch,
+                                                     capsys):
+    zc = FakeZC({
+        "Upstairs._hap._tcp.local.": FakeInfo(
+            ip="192.0.2.10", props={b"id": b"AA:BB"}),
+        "Upstairs (2)._hap._tcp.local.": FakeInfo(
+            ip="192.0.2.66", props={b"id": b"AA:BB"}),
+    })
+    lst = p.HapListener()
+    for name in zc.infos:
+        lst.add_service(zc, "_hap._tcp.local.", name)
+    ips = sorted(d["ip"] for d in lst.devices.values())
+    assert ips == ["192.0.2.10", "192.0.2.66"]   # neither replaced
+    # and the wizard warns before you pick one
+    monkeypatch.setattr(p, "scan", lambda *a, **k: _done(
+        list(lst.devices.values())))
+    scripted_input(monkeypatch, ["upstairs", "q"])
+    asyncio.run(p.wizard(str(tmp_path)))
+    out = capsys.readouterr().out
+    assert "same id" in out and "AA:BB" in out
+
+
+async def _done(value):
+    return value
+
+
+def test_wizard_escapes_device_supplied_text(tmp_path, monkeypatch, scans,
+                                             capsys):
+    scans.append([dict(TARGET, name="Evil\x1b[2J\x07Name", id="I\x1bD")])
+    scripted_input(monkeypatch, ["", "y", "q"])
+    asyncio.run(p.wizard(str(tmp_path)))
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\x07" not in out
+    assert "Evil" in out and "Name" in out
+
+
+@pytest.mark.parametrize("name", ["D:x.json", "x.json:ads.json", "a:b"])
+def test_filename_with_colon_rejected(name):
+    assert p.check_filename(name)[0] is None
+
+
+def test_repairing_drops_invalid_modes_and_says_so(tmp_path, monkeypatch,
+                                                   scans, fake_pair,
+                                                   capsys):
+    (tmp_path / "pair.json").write_text('{"_modes": "heat"}')
+    scans.append([TARGET])
+    scripted_input(monkeypatch, ["main", "1", "", "", "pair.json", "y",
+                                 "12345678"])
+    asyncio.run(p.wizard(str(tmp_path)))
+    saved = json.loads((tmp_path / "pair.json").read_text())
+    assert "_modes" not in saved
+    assert "not keeping" in capsys.readouterr().out
+
+
+def test_repairing_says_it_keeps_modes(tmp_path, monkeypatch, scans,
+                                       fake_pair, capsys):
+    (tmp_path / "pair.json").write_text('{"_modes": ["Heat", "off"]}')
+    scans.append([TARGET])
+    scripted_input(monkeypatch, ["main", "1", "", "", "pair.json", "y",
+                                 "12345678"])
+    asyncio.run(p.wizard(str(tmp_path)))
+    saved = json.loads((tmp_path / "pair.json").read_text())
+    assert saved["_modes"] == ["off", "heat"]
+    assert "keeping allowed modes: off, heat" in capsys.readouterr().out
